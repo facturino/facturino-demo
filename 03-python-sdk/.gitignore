@@ -1,0 +1,12 @@
+# Local environment / secrets — never commit a real API key or webhook secret
+.env
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/

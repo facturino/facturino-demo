@@ -1,0 +1,21 @@
+{
+  "name": "facturino-demo-no-sdk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Atelier Dupont — full Facturino billing scenario over raw HTTP (no SDK).",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/server.js",
+    "dev": "node --experimental-strip-types --watch src/server.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "20.14.10",
+    "typescript": "5.5.4"
+  }
+}

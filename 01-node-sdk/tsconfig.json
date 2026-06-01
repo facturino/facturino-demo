@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "declaration": false,
+    "sourceMap": true,
+    "types": ["node"]
+
+    // Local development only — resolve "@facturino/node" against a sibling
+    // checkout of the SDK repository when it is NOT installed from the VCS
+    // dependency in package.json yet. Uncomment to typecheck offline:
+    //
+    // "baseUrl": ".",
+    // "paths": {
+    //   "@facturino/node": ["../../facturino-node/dist/esm/index.d.ts"]
+    // }
+  },
+  "include": ["src/**/*.ts"]
+}

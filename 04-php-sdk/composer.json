@@ -1,0 +1,28 @@
+{
+    "name": "facturino-demo/php-sdk",
+    "description": "Atelier Dupont — a B2B SaaS that bills end to end through the Facturino API (PHP SDK demo).",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.1",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "facturino/facturino-php": "dev-main"
+    },
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/facturino/facturino-php"
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "AtelierDupont\\": "src/"
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true
+    }
+}

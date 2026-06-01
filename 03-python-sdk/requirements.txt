@@ -1,0 +1,11 @@
+# Facturino Python SDK.
+#
+# Until the package is published to PyPI, install it straight from the
+# public source repository (VCS dependency):
+facturino @ git+https://github.com/facturino/facturino-python
+#
+# Once published, replace the line above with the registry form:
+# facturino>=1.0
+#
+# The demo's HTTP server. Flask pulls in Werkzeug as a transitive dep.
+flask>=3.0

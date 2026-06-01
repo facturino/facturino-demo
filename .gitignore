@@ -1,0 +1,30 @@
+# Secrets
+.env
+*.local
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# PHP
+vendor/
+composer.lock
+
+# Go
+*.exe
+/02-go-sdk/bin/
+
+# OS / editor
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
