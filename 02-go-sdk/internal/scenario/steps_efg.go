@@ -133,6 +133,24 @@ func (r *Runner) StepCreditNote(ctx context.Context) error {
 		return err
 	})
 
+	// F.17 — Read the parent invoice back with the credit notes inlined
+	// (expand=credit_notes), surfacing the linked avoirs and the net
+	// balance (invoice total less the sum of its credit notes).
+	r.runStep("invoices.Get (expand=credit_notes)", func() error {
+		inv, err := r.client.Invoices.Get(r.state.InvoiceID, &facturino.InvoiceGetParams{
+			Expand: []string{"credit_notes"},
+		})
+		if err != nil {
+			return err
+		}
+		if inv.Expanded == nil {
+			r.log.OK("no expanded payload returned")
+			return nil
+		}
+		r.log.OK("%d linked credit notes, net_balance=%s", len(inv.Expanded.CreditNotes), inv.Expanded.NetBalance)
+		return nil
+	})
+
 	return nil
 }
 

@@ -33,23 +33,26 @@ les webhooks Facturino. Aucune UI lourde — la valeur est dans l'usage de l'API
 
 ### B. Catalogue & client
 5. **Produits** — `products.create` (abonnement mensuel + prestation à l'unité),
-   `products.list`, `products.get`, `products.update`. Import/export :
+   `products.list` (dont filtres `q` recherche par nom, `category`, `active`),
+   `products.get`, `products.update`. Import/export :
    `products.importCsv` / `products.exportCsv`.
-6. **Client** — `customers.lookup` (SIRENE/VIES) puis `customers.create`,
+6. **Client** — `customers.lookup` (SIRENE/VIES) puis `customers.create` (avec un
+   contact `role: billing` qui reçoit les factures par défaut),
    `customers.get`, `customers.update`, `customers.list`. CSV :
    `customers.importCsv` / `customers.exportCsv`.
 
 ### C. Devis → facture
 7. **Devis** — `quotes.create`, `quotes.send`, `quotes.get`, `quotes.accept`,
-   `quotes.getPdf`, `quotes.getSignatureProof`, puis `quotes.convert`
-   (→ facture brouillon).
+   `quotes.getPdf`, `quotes.getSignatureProof`, `quotes.clone` (re-proposer un
+   devis similaire en brouillon), puis `quotes.convert` (→ facture brouillon).
 8. **Validation amont** — `validate.run` sur le payload de facture avant
    création (montre la validation EN16931 sans rien émettre).
 
 ### D. Cycle de vie facture
 9. **Créer / finaliser** — `invoices.create` (buyer BG-7, lignes, payment,
    purchaseOrderNumber BT-13), `invoices.finalize` (numérotation),
-   `invoices.get`, `invoices.getStatus`.
+   `invoices.get`, `invoices.getStatus`, `invoices.list` (dont filtre
+   `convertedFrom` : retrouver les factures issues du devis converti).
 10. **Documents** — `invoices.getPdf`, `invoices.getFacturx`, `invoices.getXml`
     (CII + UBL), via `jobs.poll` quand la génération est asynchrone.
 11. **Dépôt PA** — `invoices.send` (dépôt à la plateforme).
@@ -69,7 +72,8 @@ les webhooks Facturino. Aucune UI lourde — la valeur est dans l'usage de l'API
 ### F. Avoir
 17. **Remboursement / correction** — `creditNotes.create` (lié à la facture),
     `creditNotes.finalize`, `creditNotes.send`, `creditNotes.getPdf`,
-    `creditNotes.getFacturx`.
+    `creditNotes.getFacturx`, puis `invoices.get` avec `expand=credit_notes`
+    (avoirs liés + solde net de la facture).
 
 ### G. Achats (factures reçues)
 18. **Entrant** — `invoices.createIncoming` / `invoices.listIncoming` ;

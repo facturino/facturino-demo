@@ -52,6 +52,11 @@ interface Invoice extends Identified {
   status?: string;
   number?: string | null;
   totals?: { totalTTC?: string; amountDue?: string };
+  // Présent uniquement quand on demande ?expand=credit_notes.
+  expanded?: {
+    credit_notes?: CreditNote[];
+    net_balance?: string;
+  };
 }
 interface CreditNote extends Identified {
   status?: string;
@@ -249,6 +254,18 @@ export class Scenario {
     const products = await this.client.listAll<Product>('/products', { limit: 50 });
     detail(`${products.length} produit(s) au catalogue`);
 
+    // products.list avec filtres: q (recherche par préfixe de nom), category,
+    // active. Ici on retrouve l'abonnement via q="abonnement".
+    step('products.list (filtres) → GET /products?q=abonnement&active=true');
+    try {
+      const filtered = await this.client.list<Product>('/products', {
+        query: { q: 'abonnement', category: 'subscription', active: true },
+      });
+      detail(`${filtered.data.length} produit(s) « abonnement » (filtre q + category + active)`);
+    } catch (err) {
+      this.softError('products.list (filtres)', err);
+    }
+
     step(`products.get → GET /products/${consulting.id}`);
     await this.client.get<Product>(`/products/${consulting.id}`);
 
@@ -308,6 +325,8 @@ export class Scenario {
             city: 'Paris',
             country: 'FR',
           },
+          // Contact de facturation: reçoit les factures par défaut (role billing).
+          contacts: [{ email: 'compta@cafe-des-artisans.example', role: 'billing' }],
           paymentTerms: 30,
         },
         idempotencyKey('customer', '55208131766522'),
@@ -412,6 +431,20 @@ export class Scenario {
       this.softError('quotes.getSignatureProof', err);
     }
 
+    // quotes.clone: re-proposer un devis similaire en brouillon (sans toucher
+    // l'original accepté). Idempotent par devis source pour rester rejouable.
+    step(`quotes.clone → POST /quotes/${quote.id}/clone (re-proposition en brouillon)`);
+    try {
+      const cloned = await this.client.post<Quote>(
+        `/quotes/${quote.id}/clone`,
+        undefined,
+        idempotencyKey('quote.clone', quote.id),
+      );
+      detail(`devis cloné (brouillon): ${cloned.id} status=${cloned.status}`);
+    } catch (err) {
+      this.softError('quotes.clone', err);
+    }
+
     step(`quotes.convert → POST /quotes/${quote.id}/convert (→ facture brouillon)`);
     try {
       const converted = await this.client.post<Invoice>(`/quotes/${quote.id}/convert`);
@@ -476,6 +509,20 @@ export class Scenario {
 
     step(`invoices.getStatus → GET /invoices/${invoiceId}/status`);
     await this.client.get(`/invoices/${invoiceId}/status`);
+
+    // invoices.list avec filtre convertedFrom: retrouver les factures issues du
+    // devis converti en C.7 (lien devis → facture).
+    if (ctx.quoteId) {
+      step(`invoices.list (convertedFrom) → GET /invoices?convertedFrom=${ctx.quoteId}`);
+      try {
+        const fromQuote = await this.client.list<Invoice>('/invoices', {
+          query: { convertedFrom: ctx.quoteId },
+        });
+        detail(`${fromQuote.data.length} facture(s) issue(s) du devis ${ctx.quoteId}`);
+      } catch (err) {
+        this.softError('invoices.list (convertedFrom)', err);
+      }
+    }
 
     // D.10 — Documents. PDF/Factur-X may be async → poll the job.
     step(`invoices.getPdf → GET /invoices/${invoiceId}/pdf (+ jobs.poll si async)`);
@@ -736,6 +783,21 @@ export class Scenario {
       await this.client
         .get(`/credit-notes/${id}/facturx`)
         .catch((e) => this.softError('creditNotes.getFacturx', e));
+
+      // invoices.get avec expand=credit_notes: récupère les avoirs liés et le
+      // solde net de la facture (TTC − avoirs) en un seul appel.
+      step(`invoices.get (expand) → GET /invoices/${ctx.invoiceId}?expand=credit_notes`);
+      try {
+        const invoice = await this.client.get<Invoice>(`/invoices/${ctx.invoiceId}`, {
+          expand: 'credit_notes',
+        });
+        const linked = invoice.expanded?.credit_notes ?? [];
+        detail(
+          `${linked.length} avoir(s) lié(s) · solde net = ${invoice.expanded?.net_balance ?? '?'} €`,
+        );
+      } catch (err) {
+        this.softError('invoices.get (expand=credit_notes)', err);
+      }
     }
   }
 

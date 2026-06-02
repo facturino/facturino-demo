@@ -62,6 +62,16 @@ func (r *Runner) StepQuoteToInvoice(ctx context.Context) error {
 		return err
 	})
 
+	// C.7 — Re-propose a similar quote as a fresh draft (post-accept,
+	// pre-convert) so the SaaS can pitch a follow-on offer.
+	r.runStep("quotes.Clone (re-propose as draft)", func() error {
+		clone, err := r.client.Quotes.Clone(quote.ID)
+		if err == nil {
+			r.log.OK("cloned draft quote %s status=%s", clone.ID, clone.Status)
+		}
+		return err
+	})
+
 	// C.8 — Dry validation of an invoice payload (EN16931 + CIUS-FR) with
 	// no write. This is the cheap pre-flight a SaaS runs before emitting.
 	r.runStep("validate.Run (invoice payload)", func() error {
@@ -160,6 +170,26 @@ func (r *Runner) StepInvoiceLifecycle(ctx context.Context) error {
 		}
 		return err
 	})
+
+	// D.9 — List the invoices issued from the converted quote
+	// (convertedFrom filter), to trace the devis -> facture lineage.
+	if r.state.QuoteID != "" {
+		r.runStep("invoices.List (convertedFrom quote)", func() error {
+			count := 0
+			it := r.client.Invoices.List(&facturino.InvoiceListParams{
+				ListParams:    facturino.ListParams{Limit: 25},
+				ConvertedFrom: r.state.QuoteID,
+			})
+			for it.Next() {
+				count++
+			}
+			if err := it.Err(); err != nil {
+				return err
+			}
+			r.log.OK("%d invoices converted from %s", count, r.state.QuoteID)
+			return nil
+		})
+	}
 
 	// D.10 — Documents (PDF, Factur-X, CII + UBL XML). Generation may be
 	// async (HTTP 202 with a job id): poll jobs.Get until ready.

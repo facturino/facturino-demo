@@ -184,6 +184,13 @@ def phase_b_catalog(client: facturino.Client, log: list[dict[str, Any]], state: 
     state["service_product_id"] = service["id"]
 
     run_step("B5 products.list", lambda: list(client.products.list(limit=25)), log)
+    # B5 — products.list with filters: prefix search (q), category, active.
+    # Find the subscription back via a name prefix to show the search filter.
+    run_step(
+        "B5 products.list (filters q / category / active)",
+        lambda: list(client.products.list(q="Abonnement", active=True, limit=25)),
+        log,
+    )
     run_step("B5 products.get", lambda: client.products.get(service["id"]), log)
     run_step(
         "B5 products.update",
@@ -220,6 +227,8 @@ def phase_b_catalog(client: facturino.Client, log: list[dict[str, Any]], state: 
                     "email": "achats@menuiserie-bernard.fr",
                     "siret": "55208131766522",
                     "vatNumber": "FR40552081317",
+                    # A billing contact receives the invoices by default.
+                    "contacts": [{"email": "compta@menuiserie-bernard.fr", "role": "billing"}],
                     "address": {
                         "line1": "12 rue des Artisans",
                         "postalCode": "69007",
@@ -277,6 +286,13 @@ def phase_c_quote(client: facturino.Client, log: list[dict[str, Any]], state: di
     run_step("C7 quotes.accept", lambda: client.quotes.accept(quote_id), log)
     _optional(log, "C7 quotes.get_pdf", lambda: client.quotes.get_pdf(quote_id))
     _optional(log, "C7 quotes.get_signature_proof", lambda: client.quotes.get_signature_proof(quote_id))
+
+    # C7 — quotes.clone: re-propose a similar quote as a fresh draft (no
+    # number assigned). Surface the new id so the operator can follow it up.
+    cloned = _optional(log, "C7 quotes.clone", lambda: client.quotes.clone(quote_id))
+    if isinstance(cloned, dict) and cloned.get("id"):
+        state["cloned_quote_id"] = cloned["id"]
+        log.append({"step": f"C7 quotes.clone -> {cloned['id']}", "ok": True})
 
     converted = run_step("C7 quotes.convert", lambda: client.quotes.convert(quote_id), log)
     # The converted draft invoice id is reused as the main invoice below.
@@ -337,6 +353,16 @@ def phase_d_invoice(client: facturino.Client, log: list[dict[str, Any]], state: 
     finalized = run_step("D9 invoices.finalize", lambda: client.invoices.finalize(invoice_id), log)
     state["invoice_number"] = finalized.get("number")
     run_step("D9 invoices.get_status", lambda: client.invoices.get_status(invoice_id), log)
+
+    # D9 — invoices.list filtered by convertedFrom: retrieve the invoices that
+    # originated from the quote converted in phase C (when a quote ran first).
+    quote_id = state.get("quote_id")
+    if quote_id:
+        run_step(
+            "D9 invoices.list (convertedFrom)",
+            lambda: list(client.invoices.list(convertedFrom=quote_id, limit=25)),
+            log,
+        )
 
     # D10 — documents. PDF / Factur-X may be async (202 + jobId): poll it.
     _resolve_document(client, log, "D10 invoices.get_pdf", lambda: client.invoices.get_pdf(invoice_id))
@@ -478,6 +504,27 @@ def phase_f_credit_note(client: facturino.Client, log: list[dict[str, Any]], sta
     _resolve_document(
         client, log, "F17 credit_notes.get_facturx", lambda: client.credit_notes.get_facturx(credit_note_id)
     )
+
+    # F17 — invoices.get with expand=credit_notes: pull the linked credit
+    # notes and the net balance (TTC minus issued credit notes) back onto the
+    # source invoice. The expansion lands under invoice["expanded"].
+    expanded = _optional(
+        log,
+        "F17 invoices.get (expand=credit_notes)",
+        lambda: client.invoices.get(invoice_id, expand="credit_notes"),
+    )
+    if isinstance(expanded, dict):
+        exp = expanded.get("expanded") or {}
+        credit_notes = exp.get("credit_notes")
+        net_balance = exp.get("net_balance")
+        log.append(
+            {
+                "step": "F17 invoices.get expanded.credit_notes + net_balance",
+                "ok": True,
+                "credit_notes": credit_notes,
+                "net_balance": net_balance,
+            }
+        )
 
 
 # --------------------------------------------------------------------------- #

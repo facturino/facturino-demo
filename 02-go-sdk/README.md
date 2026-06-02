@@ -156,11 +156,11 @@ The scenario steps map to SDK calls as follows. Service names are the fields on
 | **A.3** PA connection (BYOPA) | `Companies.ConnectPA`, `Companies.TestPAConnection` | `POST /run/bootstrap` |
 | **A.3** Reference tables | `Reference.ListLegalForms`, `Reference.ListNafCodes` | `POST /run/bootstrap` |
 | **A.4** Quotas | `Usage.Retrieve` | `POST /run/bootstrap` |
-| **B.5** Products | `Products.Create` / `Get` / `Update` / `List` / `ExportCSV` | `POST /run/catalogue` |
-| **B.6** Customer | `Customers.Lookup` / `Create` / `Get` / `Update` / `List` / `ExportCSV` | `POST /run/catalogue` |
-| **C.7** Quote | `Quotes.Create` / `Send` / `Get` / `Accept` / `GetPDF` / `GetSignatureProof` / `Convert` | `POST /run/quote` |
+| **B.5** Products | `Products.Create` / `Get` / `Update` / `List` (incl. `ProductListParams{Q, Category, Active}` filters) / `ExportCSV` | `POST /run/catalogue` |
+| **B.6** Customer | `Customers.Lookup` / `Create` (with a `Contact{Role: "billing"}`) / `Get` / `Update` / `List` / `ExportCSV` | `POST /run/catalogue` |
+| **C.7** Quote | `Quotes.Create` / `Send` / `Get` / `Accept` / `GetSignatureProof` / `GetPDF` / `Clone` / `Convert` | `POST /run/quote` |
 | **C.8** Pre-flight validation | `Validate.Run` | `POST /run/quote` |
-| **D.9** Create / finalize | `Invoices.Create` / `Finalize` / `Get` / `GetStatus` | `POST /run/invoice` |
+| **D.9** Create / finalize | `Invoices.Create` / `Finalize` / `Get` / `GetStatus` / `List` (`InvoiceListParams{ConvertedFrom}`) | `POST /run/invoice` |
 | **D.10** Documents | `Invoices.GetPDF` / `GetFacturX` / `GetXML` (CII + UBL), `Jobs.Get` (poll) | `POST /run/invoice` |
 | **D.11** Deposit to PA | `Invoices.Send`, `Sandbox.SimulateStatus` (determinism) | `POST /run/invoice` |
 | **D.12** Payment | `Invoices.CreatePaymentLink` / `CreatePortalLink`, `Payments.Create` / `List` | `POST /run/invoice` |
@@ -168,7 +168,7 @@ The scenario steps map to SDK calls as follows. Service names are the fields on
 | **D.14** Audit trail | `Invoices.Verify`, `Invoices.GetAuditTrail`, `Invoices.GenerateAuditTrailPDF` | `POST /run/invoice` |
 | **D.15** Clone | `Invoices.Clone` | `POST /run/invoice` |
 | **E.16** Recurring | `RecurringInvoices.Create` / `Get` / `List` / `Update` / `Pause` / `Resume` | `POST /run/recurring` |
-| **F.17** Credit note | `CreditNotes.Create` / `Finalize` / `Send` / `GetPDF` / `GetFacturX` | `POST /run/credit-note` |
+| **F.17** Credit note | `CreditNotes.Create` / `Finalize` / `Send` / `GetPDF` / `GetFacturX`, then `Invoices.Get` (`InvoiceGetParams{Expand: ["credit_notes"]}` → `Invoice.Expanded.CreditNotes` + `NetBalance`) | `POST /run/credit-note` |
 | **G.18** Received invoices | `Invoices.CreateIncoming` / `ListIncoming`, `ReceivedInvoices.List` / `Get` / `Approve` / `Refuse`¹ / `Suspend`¹ / `RecordPayment` | `POST /run/received` |
 | **H.19** Webhook endpoint | `WebhookEndpoints.Create` / `List` / `Test` | `POST /run/webhooks` |
 | **H.20** Reception | `facturino.VerifyWebhookSignature` (in `internal/server`) | `POST /webhooks` |

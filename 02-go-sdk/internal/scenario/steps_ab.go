@@ -200,7 +200,7 @@ func (r *Runner) StepCatalogueAndCustomer(ctx context.Context) error {
 	})
 	r.runStep("products.List", func() error {
 		count := 0
-		it := r.client.Products.List(&facturino.ListParams{Limit: 25})
+		it := r.client.Products.List(&facturino.ProductListParams{ListParams: facturino.ListParams{Limit: 25}})
 		for it.Next() {
 			count++
 		}
@@ -208,6 +208,30 @@ func (r *Runner) StepCatalogueAndCustomer(ctx context.Context) error {
 			return err
 		}
 		r.log.OK("%d products in catalogue", count)
+		return nil
+	})
+	// B.5 — Filtered catalogue search: find the active subscription product
+	// by name prefix and category (q + category + active).
+	r.runStep("products.List (q=abonnement, category=subscription, active)", func() error {
+		active := true
+		it := r.client.Products.List(&facturino.ProductListParams{
+			ListParams: facturino.ListParams{Limit: 25},
+			Q:          "abonnement",
+			Category:   "subscription",
+			Active:     &active,
+		})
+		count := 0
+		var firstMatch string
+		for it.Next() {
+			if firstMatch == "" {
+				firstMatch = it.Product().ID
+			}
+			count++
+		}
+		if err := it.Err(); err != nil {
+			return err
+		}
+		r.log.OK("%d matching products (first=%s)", count, firstMatch)
 		return nil
 	})
 	r.runStep("products.ExportCsv", func() error {

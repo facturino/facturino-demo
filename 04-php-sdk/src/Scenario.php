@@ -240,7 +240,7 @@ final class Scenario
         });
 
         // B5c — Lecture / mise a jour / liste (pagination par curseur).
-        $this->step('B5c', 'products.get / update / list', function (): array {
+        $this->step('B5c', 'products.get / update / list (dont filtres q / category / active)', function (): array {
             $id = $this->state['productConsultingId'];
             Product::retrieve($id);
             Product::update($id, ['unitPrice' => 12500]); // 125,00 EUR
@@ -253,7 +253,16 @@ final class Scenario
                 }
             }
 
-            return ['productsSeen' => $count];
+            // Liste filtree : q (recherche par prefixe de nom), category, active.
+            // Ici on retrouve l'abonnement cree en B5 via q="abonnement".
+            $filtered = Product::all([
+                'q' => 'abonnement',
+                'category' => 'subscription',
+                'active' => true,
+                'limit' => 25,
+            ]);
+
+            return ['productsSeen' => $count, 'matchedByFilter' => count($filtered)];
         });
 
         // B5d — Import / export CSV (jobs asynchrones).
@@ -289,6 +298,10 @@ final class Scenario
                     'postalCode' => '69002',
                     'city' => 'Lyon',
                     'country' => 'FR',
+                ],
+                // Contact de facturation : recoit les factures par defaut (role billing).
+                'contacts' => [
+                    ['email' => 'compta@boulangerie-martin.test', 'role' => 'billing'],
                 ],
             ], $this->idem->key('B6-customer'));
             $this->state['customerId'] = $customer['id'];
@@ -382,6 +395,15 @@ final class Scenario
             return ['status' => $accepted['status'] ?? null, 'hasProof' => isset($proof['id'])];
         });
 
+        // C7c2 — Re-proposer un devis similaire : clone le devis accepte en un
+        // nouveau brouillon, sans toucher l'original. POST /v1/quotes/:id/clone.
+        $this->step('C7c2', 'quotes.clone — re-proposition en brouillon', function (): array {
+            $cloned = Quote::clone($this->state['quoteId']);
+            $this->state['clonedQuoteId'] = $cloned['id'] ?? null;
+
+            return ['clonedQuoteId' => $cloned['id'] ?? null, 'status' => $cloned['status'] ?? null];
+        });
+
         $this->step('C7d', 'quotes.convert — devis accepte -> facture brouillon', function (): array {
             $invoice = Quote::convert($this->state['quoteId']);
             // La facture issue de la conversion sert de base au cycle D.
@@ -419,15 +441,26 @@ final class Scenario
         });
 
         // D9b — Finaliser (numerotation atomique, irreversible).
-        $this->step('D9b', 'invoices.finalize / get / getStatus', function (): array {
+        $this->step('D9b', 'invoices.finalize / get / getStatus / list (convertedFrom)', function (): array {
             $id = $this->invoiceId();
             $finalized = Invoice::finalize($id);
             Invoice::retrieve($id);
             $status = Invoice::getStatus($id);
 
+            // Tracer le lien devis -> facture : retrouver les factures issues du
+            // devis converti en C (filtre convertedFrom). GET /v1/invoices?convertedFrom=quo_...
+            $fromQuote = null;
+            if (isset($this->state['quoteId']) && is_string($this->state['quoteId'])) {
+                $fromQuote = count(Invoice::all([
+                    'convertedFrom' => $this->state['quoteId'],
+                    'limit' => 25,
+                ]));
+            }
+
             return [
                 'number' => $finalized['number'] ?? null,
                 'status' => $status['status'] ?? ($finalized['status'] ?? null),
+                'fromQuote' => $fromQuote,
             ];
         });
 
@@ -632,6 +665,19 @@ final class Scenario
             CreditNote::getFacturx($id);
 
             return ['number' => $finalized['number'] ?? null];
+        });
+
+        // F17c — Facture avec ses avoirs lies : invoices.get expand=credit_notes
+        // ramene les avoirs rattaches + le solde net (TTC - avoirs) en un appel.
+        // GET /v1/invoices/:id?expand=credit_notes.
+        $this->step('F17c', 'invoices.get expand=credit_notes — avoirs lies + solde net', function (): array {
+            $expanded = Invoice::retrieve($this->invoiceId(), ['expand' => 'credit_notes']);
+            $linked = $expanded['expanded']['credit_notes'] ?? [];
+
+            return [
+                'linkedCreditNotes' => count($linked),
+                'netBalance' => $expanded['expanded']['net_balance'] ?? null,
+            ];
         });
     }
 

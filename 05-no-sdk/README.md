@@ -133,9 +133,10 @@ Every row is a real request issued by `src/scenario.ts`.
 |---|---|---|
 | B.5 | products.create | `POST /products` |
 | B.5 | products.list / get / update | `GET /products` · `GET /products/{id}` · `PATCH /products/{id}` |
+| B.5 | products.list (filtres) | `GET /products?q=…&category=…&active=true` |
 | B.5 | products.exportCsv / importCsv | `GET /products/export` · `POST /products/import` |
 | B.6 | customers.lookup | `POST /customers/lookup` |
-| B.6 | customers.create / get / update / list | `POST /customers` · `GET /customers/{id}` · `PATCH /customers/{id}` · `GET /customers` |
+| B.6 | customers.create (contact `role: billing`) / get / update / list | `POST /customers` · `GET /customers/{id}` · `PATCH /customers/{id}` · `GET /customers` |
 | B.6 | customers.exportCsv / importCsv | `GET /customers/export` · `POST /customers/import` |
 
 ### C. Devis → facture
@@ -144,6 +145,7 @@ Every row is a real request issued by `src/scenario.ts`.
 |---|---|---|
 | C.7 | quotes.create / send / get / accept | `POST /quotes` · `POST /quotes/{id}/send` · `GET /quotes/{id}` · `POST /quotes/{id}/accept` |
 | C.7 | quotes.getPdf / getSignatureProof | `GET /quotes/{id}/pdf` · `GET /quotes/{id}/signature-proof` |
+| C.7 | quotes.clone (re-proposition brouillon) | `POST /quotes/{id}/clone` |
 | C.7 | quotes.convert | `POST /quotes/{id}/convert` |
 | C.8 | validate.run | `POST /validate` |
 
@@ -152,6 +154,7 @@ Every row is a real request issued by `src/scenario.ts`.
 | Step | Operation | HTTP request |
 |---|---|---|
 | D.9 | invoices.create / finalize / get / getStatus | `POST /invoices` · `POST /invoices/{id}/finalize` · `GET /invoices/{id}` · `GET /invoices/{id}/status` |
+| D.9 | invoices.list (convertedFrom) | `GET /invoices?convertedFrom=quo_…` |
 | D.10 | invoices.getPdf / getFacturx / getXml | `GET /invoices/{id}/pdf` · `GET /invoices/{id}/facturx` · `GET /invoices/{id}/xml?format=cii|ubl` |
 | D.10 | jobs.poll | `GET /jobs/{id}` |
 | D.11 | invoices.send (dépôt PA) | `POST /invoices/{id}/send` |
@@ -175,6 +178,7 @@ Every row is a real request issued by `src/scenario.ts`.
 |---|---|---|
 | F.17 | creditNotes.create / finalize / send | `POST /credit-notes` · `POST /credit-notes/{id}/finalize` · `POST /credit-notes/{id}/send` |
 | F.17 | creditNotes.getPdf / getFacturx | `GET /credit-notes/{id}/pdf` · `GET /credit-notes/{id}/facturx` |
+| F.17 | invoices.get (expand credit_notes + net_balance) | `GET /invoices/{id}?expand=credit_notes` |
 
 ### G. Achats (factures reçues)
 

@@ -166,6 +166,14 @@ export class Scenario {
     const list = await this.f.products.list({ limit: 5 })
     log.info(`products.list first page: ${list.data.length} item(s), has_more=${list.has_more}`)
 
+    // Catalogue search with filters: a SaaS typically looks a product up by a
+    // prefix of its name (q), scoped to a category and to active items only.
+    // Here we resolve the subscription back from its name prefix.
+    const byName = await this.f.products.list({ q: 'abonnement', active: true, limit: 5 })
+    log.info(`products.list q="abonnement" active=true: ${byName.data.length} match(es)`)
+    const subscriptions = await this.f.products.list({ category: 'subscription', active: true, limit: 5 })
+    log.info(`products.list category=subscription active=true: ${subscriptions.data.length} item(s)`)
+
     // CSV import/export round-trip (async jobs).
     const exportJob = await this.f.products.exportCsv()
     log.info(`products.exportCsv → job ${exportJob.id} (${exportJob.status})`)
@@ -208,6 +216,8 @@ export class Scenario {
           country: 'FR',
         },
         email: 'compta@beta-industries.example',
+        // A `billing` contact receives the invoices by email by default.
+        contacts: [{ email: 'factures@beta-industries.example', role: 'billing' }],
         paymentTerms: 30,
         preferredFormat: 'facturx',
       },
@@ -224,7 +234,10 @@ export class Scenario {
   // ---------------------------------------------------------------------------
 
   /** C.7 — Quote lifecycle: create, send, accept, then convert to a draft invoice. */
-  async quoteToInvoice(customer: Customer, service: Product): Promise<Invoice> {
+  async quoteToInvoice(
+    customer: Customer,
+    service: Product,
+  ): Promise<{ draft: Invoice; quoteId: string }> {
     log.step('C', 'Quote → invoice')
 
     const quote: Quote = await this.f.quotes.create(
@@ -254,12 +267,23 @@ export class Scenario {
       log.warn(`getSignatureProof: ${describeError(err)}`)
     }
 
+    // C.7 — Clone the accepted quote as a fresh draft to re-propose a similar
+    // deal (idempotent: a re-run returns the same clone for this quote).
+    try {
+      const cloned = await this.f.quotes.clone(quote.id, {
+        idempotencyKey: idempotencyKey('quote-clone', quote.id),
+      })
+      log.ok(`Cloned to new draft quote ${cloned.id} (${cloned.status})`)
+    } catch (err) {
+      log.warn(`quotes.clone: ${describeError(err)}`)
+    }
+
     // C.7 — Convert the accepted quote to a draft invoice.
     const draft = await this.f.quotes.convert(quote.id, {
       idempotencyKey: idempotencyKey('quote-convert', quote.id),
     })
     log.ok(`Converted to draft invoice ${draft.id} (${draft.status})`)
-    return draft
+    return { draft, quoteId: quote.id }
   }
 
   /** C.8 — Upstream validation: run EN16931 validation on a payload without emitting. */
@@ -293,8 +317,13 @@ export class Scenario {
     customer: Customer,
     subscription: Product,
     draftFromQuote: Invoice,
+    sourceQuoteId: string,
   ): Promise<Invoice> {
     log.step('D', 'Invoice lifecycle')
+
+    // D.9 — Trace invoices issued from the converted quote (filter convertedFrom).
+    const fromQuote = await this.f.invoices.list({ convertedFrom: sourceQuoteId, limit: 5 })
+    log.info(`invoices.list convertedFrom=${sourceQuoteId}: ${fromQuote.data.length} invoice(s)`)
 
     // D.9 — Create a fresh invoice carrying both buyer detail (BG-7) and a
     // purchase order number (BT-13), so finalization is fully populated.
@@ -487,6 +516,16 @@ export class Scenario {
       })
       await this.documentUrlOrJob('credit-note PDF', () => this.f.creditNotes.getPdf(creditNote.id))
       await this.documentUrlOrJob('credit-note Factur-X', () => this.f.creditNotes.getFacturx(creditNote.id))
+
+      // F.17 — Re-read the source invoice with its linked credit notes inlined.
+      // `expanded.net_balance` is the TTC total minus the credited amounts.
+      const expanded = await this.f.invoices.get(invoice.id, { expand: ['credit_notes'] })
+      const linked = expanded.expanded?.credit_notes ?? []
+      log.info(
+        `Invoice ${invoice.id}: ${linked.length} linked credit note(s), net_balance=${
+          expanded.expanded?.net_balance ?? 'n/a'
+        }`,
+      )
     } catch (err) {
       log.warn(`credit note finalize/send: ${describeError(err)}`)
     }
@@ -974,10 +1013,16 @@ export async function runScenario(
   const { subscription, service } = await scenario.catalogue()
   const customer = await scenario.customer()
 
-  const draftFromQuote = await scenario.quoteToInvoice(customer, service)
+  const { draft: draftFromQuote, quoteId } = await scenario.quoteToInvoice(customer, service)
   await scenario.validateUpstream(customer, service)
 
-  const invoice = await scenario.invoiceLifecycle(company, customer, subscription, draftFromQuote)
+  const invoice = await scenario.invoiceLifecycle(
+    company,
+    customer,
+    subscription,
+    draftFromQuote,
+    quoteId,
+  )
   await scenario.recurring(customer, subscription)
   await scenario.creditNote(customer, invoice, service)
   await scenario.purchases()

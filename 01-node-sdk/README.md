@@ -117,11 +117,11 @@ rebuild their (idempotent) prerequisites first, so any phase runs standalone.
 | **A.2** | Issuing company + invoicing/accounting/reminder settings | `companies.list`, `companies.updateInvoicingSettings`, `settings.updateAccounting`, `settings.updateReminders`, `reference.listLegalForms`, `reference.listNafCodes` |
 | **A.3** | Connect PA (BYOPA) + health check | `companies.connectPA`, `companies.testPAConnection` |
 | **A.4** | Quotas vs plan limits | `usage.retrieve` |
-| **B.5** | Products (subscription + service), CSV | `products.create`, `products.get`, `products.update`, `products.list`, `products.exportCsv` |
-| **B.6** | Customer (SIRENE lookup, lookup-or-create) | `customers.lookup`, `customers.list`, `customers.create`, `customers.get`, `customers.update` |
-| **C.7** | Quote → invoice | `quotes.create`, `quotes.send`, `quotes.get`, `quotes.accept`, `quotes.getPdf`, `quotes.getSignatureProof`, `quotes.convert` |
+| **B.5** | Products (subscription + service), CSV | `products.create`, `products.get`, `products.update`, `products.list` (filters `q`, `category`, `active`), `products.exportCsv` |
+| **B.6** | Customer (SIRENE lookup, lookup-or-create, `billing` contact) | `customers.lookup`, `customers.list`, `customers.create` (`contacts: [{ role: 'billing' }]`), `customers.get`, `customers.update` |
+| **C.7** | Quote → invoice | `quotes.create`, `quotes.send`, `quotes.get`, `quotes.accept`, `quotes.getPdf`, `quotes.getSignatureProof`, `quotes.clone`, `quotes.convert` |
 | **C.8** | Upstream EN16931 validation | `validate.run` (`siret`, `invoice`) |
-| **D.9** | Create + finalize | `invoices.create`, `invoices.finalize`, `invoices.get`, `invoices.getStatus` |
+| **D.9** | Create + finalize + trace from quote | `invoices.create`, `invoices.finalize`, `invoices.get`, `invoices.getStatus`, `invoices.list` (filter `convertedFrom`) |
 | **D.10** | Documents (PDF, Factur-X, CII+UBL) | `invoices.getPdf`, `invoices.getFacturx`, `invoices.getXml`, `jobs.poll` |
 | **D.11** | Deposit to PA (+ deterministic status chain) | `invoices.send`, `sandbox.simulateStatus` |
 | **D.12** | Collection | `invoices.createPaymentLink`, `invoices.createPortalLink`, `invoices.payments.create`, `invoices.payments.list` |
@@ -129,7 +129,7 @@ rebuild their (idempotent) prerequisites first, so any phase runs standalone.
 | **D.14** | Audit trail | `invoices.verify`, `invoices.getAuditTrail`, `invoices.generateAuditTrailPdf` |
 | **D.15** | Clone | `invoices.clone`, `invoices.del` |
 | **E.16** | Recurring subscription | `recurringInvoices.create`, `recurringInvoices.get`, `recurringInvoices.update`, `recurringInvoices.pause`, `recurringInvoices.resume`, `recurringInvoices.list` |
-| **F.17** | Credit note | `creditNotes.create`, `creditNotes.finalize`, `creditNotes.send`, `creditNotes.getPdf`, `creditNotes.getFacturx` |
+| **F.17** | Credit note (+ invoice with credit notes expanded) | `creditNotes.create`, `creditNotes.finalize`, `creditNotes.send`, `creditNotes.getPdf`, `creditNotes.getFacturx`, `invoices.get` (`expand: ['credit_notes']` → `expanded.credit_notes`, `expanded.net_balance`) |
 | **G.18** | Purchases / received invoices | `invoices.createIncoming`, `invoices.listIncoming`, `receivedInvoices.list`, `receivedInvoices.get`, `receivedInvoices.approve`, `receivedInvoices.recordPayment` (`refuse`/`suspend` coded) |
 | **H.19** | Register + test webhook endpoint | `webhookEndpoints.list`, `webhookEndpoints.create`, `webhookEndpoints.test` |
 | **H.20** | Receive + verify events | `webhooks.constructEvent` (in `src/webhook.ts`) |

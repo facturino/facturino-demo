@@ -102,8 +102,8 @@ async function runPhase(phase: Phase, flags: RunFlags): Promise<void> {
   }
 
   // invoice / creditNote / purchases need a finalized invoice.
-  const draft = await scenario.quoteToInvoice(customer, service)
-  const invoice = await scenario.invoiceLifecycle(company, customer, subscription, draft)
+  const { draft, quoteId } = await scenario.quoteToInvoice(customer, service)
+  const invoice = await scenario.invoiceLifecycle(company, customer, subscription, draft, quoteId)
 
   switch (phase) {
     case 'invoice':

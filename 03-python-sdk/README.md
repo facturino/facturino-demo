@@ -129,6 +129,10 @@ account.
   re-running the scenario is a replay, not a duplicate (`helpers.idempotency_key`).
 - **Cursor pagination**: list endpoints return SDK pages that auto-follow
   `has_more`; the demo iterates them directly.
+- **Filters & expansion**: list filters (`products.list(q=…, active=…)`,
+  `invoices.list(convertedFrom="quo_…")`) and field expansion
+  (`invoices.get(id, expand="credit_notes")`) pass straight through as query
+  params — the SDK is a thin pass-through over `/v1`.
 - **Error handling**: API errors are rendered with their `request_id` (quote it
   to Facturino support) via `helpers.describe_error`.
 - **Lookup-or-create**: the customer and webhook endpoint are reused if they
@@ -148,11 +152,11 @@ account.
 | A3 | PA connection (BYOPA) | `companies.connect_pa`, `companies.test_pa_connection` |
 | A3 | Reference tables | `reference.list_legal_forms`, `reference.list_naf_codes` |
 | A4 | Quota usage | `usage.retrieve` |
-| B5 | Products (subscription + service) | `products.create`, `products.list`, `products.get`, `products.update`, `products.import_csv`, `products.export_csv` |
-| B6 | Customer (SIRENE lookup, CRUD) | `customers.lookup`, `customers.create`, `customers.get`, `customers.update`, `customers.list`, `customers.export_csv` |
-| C7 | Quote lifecycle | `quotes.create`, `quotes.send`, `quotes.get`, `quotes.accept`, `quotes.get_pdf`, `quotes.get_signature_proof`, `quotes.convert` |
+| B5 | Products (subscription + service) | `products.create`, `products.list` (incl. filters `q` / `category` / `active`), `products.get`, `products.update`, `products.import_csv`, `products.export_csv` |
+| B6 | Customer (SIRENE lookup, CRUD) | `customers.lookup`, `customers.create` (with a `role: billing` contact), `customers.get`, `customers.update`, `customers.list`, `customers.export_csv` |
+| C7 | Quote lifecycle | `quotes.create`, `quotes.send`, `quotes.get`, `quotes.accept`, `quotes.get_pdf`, `quotes.get_signature_proof`, `quotes.clone`, `quotes.convert` |
 | C8 | Upfront EN16931 validation | `validate.run` |
-| D9 | Create / finalize invoice | `invoices.create`, `invoices.get`, `invoices.finalize`, `invoices.get_status` |
+| D9 | Create / finalize invoice | `invoices.create`, `invoices.get`, `invoices.finalize`, `invoices.get_status`, `invoices.list` (filter `convertedFrom`) |
 | D10 | Documents (PDF / Factur-X / XML) | `invoices.get_pdf`, `invoices.get_facturx`, `invoices.get_xml`, `jobs.get` (poll) |
 | D11 | PA deposit | `invoices.send` |
 | D12 | Collection | `invoices.create_payment_link`, `invoices.create_portal_link`, `payments.create`, `payments.list` |
@@ -160,7 +164,7 @@ account.
 | D14 | Audit trail | `invoices.verify`, `invoices.get_audit_trail`, `invoices.generate_audit_trail_pdf` |
 | D15 | Clone | `invoices.clone` |
 | E16 | Recurring subscription | `recurring_invoices.create`, `recurring_invoices.list`, `recurring_invoices.get`, `recurring_invoices.update`, `recurring_invoices.pause`, `recurring_invoices.resume` |
-| F17 | Credit note | `credit_notes.create`, `credit_notes.finalize`, `credit_notes.send`, `credit_notes.get_pdf`, `credit_notes.get_facturx` |
+| F17 | Credit note | `credit_notes.create`, `credit_notes.finalize`, `credit_notes.send`, `credit_notes.get_pdf`, `credit_notes.get_facturx`, `invoices.get` (`expand=credit_notes` → linked credit notes + net balance) |
 | G18 | Purchases (received invoices) | `invoices.create_incoming`, `invoices.list_incoming`, `received_invoices.list`, `received_invoices.retrieve`, `received_invoices.approve`, `received_invoices.refuse`*, `received_invoices.suspend`*, `received_invoices.record_payment` |
 | H19 | Webhook endpoint registration | `webhook_endpoints.create`, `webhook_endpoints.list`, `webhook_endpoints.get` |
 | H20 | Test + reception | `webhook_endpoints.test`, `Webhook.construct_event` (in `/webhooks`) |

@@ -161,19 +161,20 @@ listed in `docs/SCENARIO.md`.
 | **A3b** | INSEE reference data | `Reference::listLegalForms()`, `Reference::listNafCodes()` |
 | **A4** | Quotas | `Usage::retrieve()` |
 | **B5 / B5b** | Products | `Product::create()` (×2) |
-| **B5c** | Product read/list | `Product::retrieve/update/all()` |
+| **B5c** | Product read/list (+ filters `q`/`category`/`active`) | `Product::retrieve/update/all()` |
 | **B5d** | Product CSV | `Product::importCsv()`, `Product::exportCsv()` |
 | **B6** | SIRENE lookup | `Customer::lookup()` |
-| **B6b** | Create customer | `Customer::create()` (idempotent) |
+| **B6b** | Create customer (billing contact `role: billing`) | `Customer::create()` (idempotent) |
 | **B6c** | Customer read/list | `Customer::retrieve/update/all()` |
 | **B6d** | Customer CSV | `Customer::importCsv()`, `Customer::exportCsv()` |
 | **C7** | Quote | `Quote::create()` |
 | **C7b** | Send/read quote | `Quote::send()`, `Quote::retrieve()` |
 | **C7c** | Accept + proof | `Quote::accept/getPdf/getSignatureProof()` |
+| **C7c2** | Clone (re-propose as draft) | `Quote::clone()` |
 | **C7d** | Convert to invoice | `Quote::convert()` |
 | **C8** | Upstream validation | `Validate::run()` (EN16931) |
 | **D9** | Create invoice | `Invoice::create()` (BG-7, BT-13) |
-| **D9b** | Finalize | `Invoice::finalize/retrieve/getStatus()` |
+| **D9b** | Finalize (+ list filter `convertedFrom`) | `Invoice::finalize/retrieve/getStatus/all()` |
 | **D10** | Documents | `Invoice::getPdf/getFacturx/getXml()`, `Job::retrieve()` |
 | **D11** | Deposit to PA | `Invoice::send()` |
 | **D11b** | Force PA status | `Sandbox::simulateStatus()` |
@@ -187,6 +188,7 @@ listed in `docs/SCENARIO.md`.
 | **E16c** | Pause/resume | `RecurringInvoice::pause/resume()` |
 | **F17** | Credit note | `CreditNote::create()` |
 | **F17b** | Finalize/send/docs | `CreditNote::finalize/send/getPdf/getFacturx()` |
+| **F17c** | Invoice + linked credit notes | `Invoice::retrieve(id, ['expand' => 'credit_notes'])` (`net_balance`) |
 | **G18** | Incoming invoice | `Invoice::createIncoming()`, `Invoice::listIncoming()` |
 | **G18b** | Received invoices | `ReceivedInvoice::all/retrieve/approve/recordPayment()` (refuse/suspend documented) |
 | **H19** | Webhook endpoint | `WebhookEndpoint::create/all/test()` |
