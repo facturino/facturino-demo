@@ -82,11 +82,11 @@ Facturino will `POST` events to `PUBLIC_BASE_URL/webhooks`. Locally, expose the
 port with a tunnel (cloudflared / ngrok) and paste the HTTPS URL into
 `PUBLIC_BASE_URL` so `webhookEndpoints.create` registers a reachable target.
 
-### Destructive / billing-real operations
+### Destructive / real-world operations
 
-Some scenario calls would change a real account or send real mail
-(`account.scheduleDeletion`, `billing.checkout`/`updateSubscription`,
-`members.invite`/`revoke`, `apiKeys.revoke`, `ereporting.submit`, …). They are
+A few scenario calls have real-world side effects — `ereporting.submit`
+transmits an e-reporting declaration to the DGFiP, and
+`receivedInvoices.suspend`/`refuse` send lifecycle events to the PA. They are
 **coded** but **guarded**: they only fire when you opt in with
 
 ```bash
@@ -120,11 +120,8 @@ Every row is a real request issued by `src/scenario.ts`.
 |---|---|---|
 | A.1 | account.retrieve | `GET /account` |
 | A.2 | companies.list / get | `GET /companies` · `GET /companies/{id}` |
-| A.2 | companies.updateInvoicingSettings | `PATCH /companies/{id}/invoicing-settings` |
-| A.2 | settings.retrieve/updateAccounting | `GET`/`PATCH /companies/{id}/settings/accounting` |
-| A.2 | settings.retrieve/updateReminders | `GET`/`PATCH /companies/{id}/settings/reminders` |
+| A.2b | companies CGV (terms) + onboarding milestone | `POST`/`GET`/`DELETE /companies/{id}/cgv` · `POST /companies/{id}/milestones` |
 | A.3 | reference.listLegalForms / listNafCodes | `GET /reference/legal-forms` · `GET /reference/naf-codes` |
-| A.3 | companies.connectPA / testPAConnection | `POST /companies/{id}/pa-connection` · `POST /companies/{id}/pa-connection/test` |
 | A.4 | usage.retrieve | `GET /usage` |
 
 ### B. Catalogue & client
@@ -159,7 +156,7 @@ Every row is a real request issued by `src/scenario.ts`.
 | D.10 | jobs.poll | `GET /jobs/{id}` |
 | D.11 | invoices.send (dépôt PA) | `POST /invoices/{id}/send` |
 | — | sandbox.simulateStatus (test mode) | `POST /sandbox/simulate-status/{id}` |
-| D.12 | invoices.createPaymentLink / createPortalLink | `POST /invoices/{id}/payment-link` · `POST /invoices/{id}/portal-link` |
+| D.12 | invoices.createPaymentLink / createPortalLink / createPaymentToken | `POST /invoices/{id}/payment-link` · `POST /invoices/{id}/portal-link` · `POST /invoices/{id}/payment-token` |
 | D.12 | payments.create / list | `POST /invoices/{id}/payments` · `GET /invoices/{id}/payments` |
 | D.13 | invoices.remind / listEvents | `POST /invoices/{id}/remind` · `GET /invoices/{id}/events` |
 | D.14 | invoices.verify / getAuditTrail / generateAuditTrailPdf | `GET /invoices/{id}/verify` · `GET /invoices/{id}/audit-trail` · `POST /invoices/{id}/audit-trail/pdf` |
@@ -203,39 +200,31 @@ Every row is a real request issued by `src/scenario.ts`.
 |---|---|---|
 | I.22 | reporting.vatReport / revenueReport | `GET /reporting/vat` · `GET /reporting/revenue` |
 | I.23 | exports.generateFec / getFecStatus | `POST /exports/fec` · `GET /exports/fec/{id}` |
-| I.23 | exports.exportInvoices | `POST /exports/invoices` |
-| I.23 | exports.exportRgpd / getExportStatus | `POST /exports/full` · `GET /exports/{id}` |
+| I.23 | exports.exportInvoices / getExportStatus | `POST /exports/invoices` · `GET /exports/{id}` |
 | I.24 | ereporting.createDeclaration / list / get / submit† | `POST /ereporting/declarations` · `GET /ereporting/declarations` · `GET /…/{id}` · `POST /…/{id}/submit` |
 | I.25 | archives.list / get | `GET /archives` · `GET /archives/{invoiceId}` |
-| I.26 | notifications.list / markRead / markAllRead | `GET /notifications` · `PATCH /notifications/{id}` · `PATCH /notifications/mark-all-read` |
-| I.26 | notifications.retrieve/updatePreferences | `GET`/`PATCH /notification-preferences` |
 
 ### J. Administration du compte
 
+Over the REST API, administration is limited to **Facturino's own billing
+(read-only)** and **RGPD data portability**. API keys, team members,
+subscription changes (upgrade/cancel/portal) and account deletion are managed
+in the Facturino web app — they are not part of the developer REST surface — so
+the parcours does not call them.
+
 | Step | Operation | HTTP request |
 |---|---|---|
-| J.27 | apiKeys.create / list / get / roll / revoke† | `POST /api-keys` · `GET /api-keys` · `GET /api-keys/{id}` · `POST /api-keys/{id}/roll` · `DELETE /api-keys/{id}` |
-| J.28 | members.invite† / list / get / updateRole† / resend† / revoke† | `POST /companies/{id}/members` · `GET /companies/{id}/members` · `GET`/`PATCH /…/{memberId}` · `POST /…/{memberId}/resend-invitation` · `DELETE /…/{memberId}` |
 | J.29 | billing.retrieveSubscription / listInvoices / getInvoicePdf | `GET /billing/subscription` · `GET /billing/invoices` · `GET /billing/invoices/{id}/pdf` |
-| J.29 | billing.updateSubscription† / pause† / resume† / checkout† / portal† | `PATCH /billing/subscription` · `POST /billing/pause` · `…/resume` · `…/checkout` · `…/portal` |
-| J.30 | account.requestExport / downloadExport | `POST /account/export` · `GET /account/exports/{id}/download` |
-| J.30 | account.updateNotifications | `PATCH /account/notifications` |
-| J.30 | account.scheduleDeletion† / cancelDeletion† | `POST /account/schedule-deletion` · `POST /account/cancel-deletion` |
-| — | cabinets.list (illustratif, plan cabinet) | `GET /cabinets` |
-| — | mfa.* (app web, hors API SaaS) | documenté, non exécuté |
+| J.30 | account.requestExport / downloadExport (RGPD) | `POST /account/export` · `GET /account/exports/{id}/download` |
 
-> **†** = guarded behind `ALLOW_DESTRUCTIVE=1` (changes a real account, sends
-> real mail, or transmits to the DGFiP). Coded, but skipped by default.
+> **†** (used in earlier phases) = guarded behind `ALLOW_DESTRUCTIVE=1` — coded
+> but skipped by default because it transmits to the DGFiP or sends real mail.
 
 ## What's covered
 
 API families touched by the parcours (union of all steps):
 
-`account · apiKeys · archives · billing · cabinets · companies · creditNotes ·
-customers · ereporting · events · exports · invoices · jobs · members ·
-notifications · payments · products · quotes · receivedInvoices ·
-recurringInvoices · reference · reporting · sandbox · settings · usage ·
-validate · webhookEndpoints · webhooks (reception)`
-
-`mfa` is documented only (web-app concern). `cabinets` is an illustrative
-plan-gated call.
+`account · archives · billing · companies · creditNotes · customers ·
+ereporting · events · exports · invoices · jobs · payments · products ·
+quotes · receivedInvoices · recurringInvoices · reference · reporting ·
+sandbox · usage · validate · webhookEndpoints · webhooks (reception)`

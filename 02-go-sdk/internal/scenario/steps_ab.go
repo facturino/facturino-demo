@@ -2,20 +2,17 @@ package scenario
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 
 	facturino "github.com/facturino/facturino-go"
 )
 
 // StepBootstrap covers phase A of the scenario: confirm the API key, find
-// the seller company, set its invoicing/accounting/reminder settings,
-// connect the PA (BYOPA), warm the reference tables and read the usage.
+// the seller company, warm the reference tables and read the usage.
 //
-//	account.Retrieve, companies.List/Get, companies.UpdateInvoicingSettings,
-//	settings.RetrieveAccounting/UpdateAccounting,
-//	settings.RetrieveReminders/UpdateReminders, companies.ConnectPA,
-//	companies.TestPAConnection, reference.ListLegalForms/ListNafCodes,
-//	usage.Retrieve.
+//	account.Retrieve, companies.List/Get,
+//	reference.ListLegalForms/ListNafCodes, usage.Retrieve.
 func (r *Runner) StepBootstrap(ctx context.Context) error {
 	// A.1 — Who am I: verify key, plan, environment.
 	r.log.Step("account.Retrieve")
@@ -55,63 +52,24 @@ func (r *Runner) StepBootstrap(ctx context.Context) error {
 	}
 	r.log.OK("%s (SIRET %s, regime %s)", company.Name, company.SIRET, company.VATRegime)
 
-	// A.2 — Invoicing settings: numbering prefix + default VAT, VAT regime.
-	r.runStep("companies.UpdateInvoicingSettings", func() error {
-		_, err := r.client.Companies.UpdateInvoicingSettings(companyID, &facturino.CompanyInvoicingSettingsUpdate{
-			VATRegime: "reel_normal",
-			InvoiceSettings: &facturino.InvoiceSettings{
-				Prefix:         "FAC-",
-				DefaultVATRate: "20.00",
-				YearlyReset:    true,
-			},
-		})
-		return err
-	})
-
-	// A.2 — Accounting settings (FEC journal, accounts).
-	r.runStep("settings.RetrieveAccounting", func() error {
-		_, err := r.client.Settings.RetrieveAccounting(companyID)
-		return err
-	})
-	r.runStep("settings.UpdateAccounting", func() error {
-		_, err := r.client.Settings.UpdateAccounting(companyID, &facturino.AccountingSettingsUpdate{
-			JournalCode: "VE",
-			Accounts:    map[string]string{"sales_services": "706000", "vat_collected_20": "445710"},
-		})
-		return err
-	})
-
-	// A.2 — Reminder schedule (J+7 / J+15 / J+30).
-	r.runStep("settings.RetrieveReminders", func() error {
-		_, err := r.client.Settings.RetrieveReminders(companyID)
-		return err
-	})
-	r.runStep("settings.UpdateReminders", func() error {
-		enabled := true
-		_, err := r.client.Settings.UpdateReminders(companyID, &facturino.ReminderSettingsUpdate{
-			Enabled:   &enabled,
-			Intervals: []int{7, 15, 30},
-		})
-		return err
-	})
-
-	// A.3 — Connect the PA (BYOPA). The client brings its own PA account.
-	// Credentials here are placeholders; in test mode the connector is a
-	// mock so this exercises the path without a real PA contract.
-	r.runStep("companies.ConnectPA (provider=mock)", func() error {
-		_, err := r.client.Companies.ConnectPA(companyID, &facturino.PAConnectionParams{
-			Provider: "mock",
-			APIKey:   "pa_test_credential",
-		})
-		return err
-	})
-	r.runStep("companies.TestPAConnection", func() error {
-		res, err := r.client.Companies.TestPAConnection(companyID)
-		if err == nil {
-			r.log.OK("PA healthy=%t latency=%dms", res.Healthy, res.LatencyMs)
+	// A.2b — Company admin: general terms (CGV) round-trip + onboarding milestone.
+	r.runStep("companies.UploadCGV / GetCGV / DeleteCGV + AddMilestone", func() error {
+		cgv := base64.StdEncoding.EncodeToString([]byte("%PDF-1.4\n% Conditions generales de vente (demo)\n"))
+		if _, err := r.client.Companies.UploadCGV(companyID, cgv); err != nil {
+			return err
 		}
+		if _, err := r.client.Companies.GetCGV(companyID); err != nil {
+			return err
+		}
+		if err := r.client.Companies.DeleteCGV(companyID); err != nil {
+			return err
+		}
+		_, err := r.client.Companies.AddMilestone(companyID, "firstInvoice")
 		return err
 	})
+
+	// Company settings (numbering, accounting, reminders) are configured in the
+	// Facturino app console — the API consumes them but does not manage them.
 
 	// A.3 — Reference tables used by company/customer forms.
 	r.runStep("reference.ListLegalForms (search SAS)", func() error {
@@ -133,7 +91,7 @@ func (r *Runner) StepBootstrap(ctx context.Context) error {
 	r.runStep("usage.Retrieve", func() error {
 		u, err := r.client.Usage.Retrieve()
 		if err == nil {
-			r.log.OK("plan=%s metrics=%d", u.Plan, len(u.Metrics))
+			r.log.OK("plan=%s counters=%d", u.Plan, len(u.Counters))
 		}
 		return err
 	})
@@ -158,7 +116,7 @@ func (r *Runner) StepCatalogueAndCustomer(ctx context.Context) error {
 		UnitPrice:      4900, // 49,00 EUR
 		VATRate:        2000, // 20,00 %
 		VATCode:        "S",
-		Unit:           "mois",
+		Unit:           "month",
 		Tags:           []string{"saas", "recurring"},
 		IdempotencyKey: r.idemKey("product-sub"),
 	})
@@ -166,7 +124,7 @@ func (r *Runner) StepCatalogueAndCustomer(ctx context.Context) error {
 		return err
 	}
 	r.state.SubscriptionProductID = sub.ID
-	r.log.OK("subscription product %s @ %s EUR HT", sub.ID, sub.UnitPrice)
+	r.log.OK("subscription product %s @ %.2f EUR HT", sub.ID, float64(sub.UnitPrice)/100)
 
 	// B.5 — One-off professional service.
 	r.log.Step("products.Create (one-off setup service)")
@@ -178,7 +136,7 @@ func (r *Runner) StepCatalogueAndCustomer(ctx context.Context) error {
 		UnitPrice:      75000, // 750,00 EUR
 		VATRate:        2000,
 		VATCode:        "S",
-		Unit:           "forfait",
+		Unit:           "flat_rate",
 		IdempotencyKey: r.idemKey("product-oneoff"),
 	})
 	if err != nil {
@@ -239,14 +197,14 @@ func (r *Runner) StepCatalogueAndCustomer(ctx context.Context) error {
 		return err
 	})
 
-	// B.6 — Customer: look up by SIRET first (SIRENE/VIES enrichment),
-	// fall back to creating a fresh B2B customer when the lookup misses.
-	const buyerSiret = "55203453400041" // example SIRET (Luhn-valid)
+	// B.6 — Customer: enrich from the INSEE Sirene registry by SIRET, then
+	// create a fresh B2B customer with the resolved details. Lookup returns
+	// registry data (not a stored customer), so we always create below.
+	const buyerSiret = "55204944776279" // example SIRET (Luhn-valid)
 	r.runStep("customers.Lookup (SIRET)", func() error {
-		cus, err := r.client.Customers.Lookup(&facturino.CustomerLookupParams{SIRET: buyerSiret})
-		if err == nil && cus.ID != "" {
-			r.state.CustomerID = cus.ID
-			r.log.OK("matched existing customer %s", cus.ID)
+		res, err := r.client.Customers.Lookup(&facturino.CustomerLookupParams{SIRET: buyerSiret})
+		if err == nil && res.Found && res.Data != nil {
+			r.log.OK("SIRENE match: %s", res.Data.Name)
 		}
 		return err
 	})
@@ -258,7 +216,7 @@ func (r *Runner) StepCatalogueAndCustomer(ctx context.Context) error {
 			Type:      "company",
 			Email:     "compta@lemoine.example",
 			SIRET:     buyerSiret,
-			VATNumber: "FR40552034534",
+			VATNumber: "FR40552049447",
 			Address: &facturino.Address{
 				Line1:      "12 rue des Artisans",
 				PostalCode: "69007",

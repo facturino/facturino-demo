@@ -77,9 +77,6 @@ curl -s -X POST localhost:4242/run/d | jq      # invoice lifecycle
 
 # Fix the idempotency run id (stable retries)
 curl -s -X POST 'localhost:4242/run?run_id=2026-05-31-demo' | jq
-
-# Enable destructive ops (revoke key/member, schedule deletion, plan change)
-curl -s -X POST 'localhost:4242/run/j?destructive=1' | jq
 ```
 
 You can also run it straight from the CLI, no HTTP server:
@@ -87,7 +84,7 @@ You can also run it straight from the CLI, no HTTP server:
 ```bash
 php public/index.php          # whole journey
 php public/index.php d        # one phase
-ALLOW_DESTRUCTIVE=1 php public/index.php j
+php public/index.php j        # account & billing (read-only)
 ```
 
 ### Routes
@@ -124,12 +121,11 @@ replay window). To receive real events, expose the server with a tunnel
   (`Console::describe()`), and the journey keeps going so you get a full report.
 - **Determinism**: in `fac_test_` mode, `sandbox.simulateStatus` advances the
   PA lifecycle so the webhook chain fires without a real deposit.
-- **Safety**: destructive/sensitive calls (`apiKeys.revoke`,
-  `members.revoke`, `billing.updateSubscription`/`portal`,
-  `account.scheduleDeletion`) are implemented but gated behind
-  `?destructive=1`. `billing.checkout` (starts a real payment) and
-  `account.scheduleDeletion` are additionally left commented or paired with an
-  immediate cancel.
+- **Safety**: the demo only exercises the invoicing lifecycle in test mode.
+  Subscription changes, account deletion and API-key/member management are
+  handled in the Facturino web app, not over the developer API, so the demo
+  never touches them. `ereporting.submit` (the only DGFiP-facing call) is safe
+  in `fac_test_` mode.
 
 ## Layout
 
@@ -155,9 +151,7 @@ listed in `docs/SCENARIO.md`.
 |---|---|---|
 | **A1** | Who am I | `Account::retrieve()` |
 | **A2** | Issuer company | `Company::all()`, `Company::retrieve()` |
-| **A2b** | Invoicing settings | `Company::updateInvoicingSettings()` |
-| **A2c** | Accounting & reminders | `Setting::retrieveAccounting/updateAccounting/retrieveReminders/updateReminders()` |
-| **A3** | Connect PA (BYOPA) | `Company::connectPA()`, `Company::testPAConnection()` |
+| **A2b** | Terms (CGV) + onboarding milestone | `Company::uploadCgv()` / `getCgv()` / `deleteCgv()`, `Company::addMilestone()` |
 | **A3b** | INSEE reference data | `Reference::listLegalForms()`, `Reference::listNafCodes()` |
 | **A4** | Quotas | `Usage::retrieve()` |
 | **B5 / B5b** | Products | `Product::create()` (×2) |
@@ -179,6 +173,7 @@ listed in `docs/SCENARIO.md`.
 | **D11** | Deposit to PA | `Invoice::send()` |
 | **D11b** | Force PA status | `Sandbox::simulateStatus()` |
 | **D12** | Payment links | `Invoice::createPaymentLink/createPortalLink()` |
+| **D12c** | Signed payment token | `Invoice::createPaymentToken()` |
 | **D12b** | Record payment | `Payment::create()`, `Payment::all()` |
 | **D13** | Reminder/events | `Invoice::remind()`, `Invoice::listEvents()` |
 | **D14** | Audit trail | `Invoice::verify/getAuditTrail/generateAuditTrailPdf()` |
@@ -195,15 +190,11 @@ listed in `docs/SCENARIO.md`.
 | **H20** | Receive | `Webhook::constructEvent()` (see `WebhookController`) |
 | **H21** | Replay | `Event::all/retrieve/retry()` |
 | **I22** | Reporting | `Reporting::vat()`, `Reporting::revenue()` |
-| **I23** | Exports | `Export::generateFec/getFecStatus/exportInvoices/exportRgpd/getExportStatus()` |
+| **I23** | Exports | `Export::generateFec/getFecStatus/exportInvoices()` |
 | **I24** | E-reporting | `Ereporting::createDeclaration/retrieve/submitDeclaration/all()` |
 | **I25** | Archives | `\Facturino\Resource\Archive::all/retrieve()` |
-| **I26** | Notifications | `Notification::all/markRead/markAllRead/retrievePreferences/updatePreferences()` |
-| **J27** | API keys | `ApiKey::create/retrieve/roll/all()` (`revoke()` gated) |
-| **J28** | Members | `Member::invite/retrieve/updateRole/resendInvitation/all()` (`revoke()` gated) |
-| **J29** | Facturino billing | `Billing::retrieveSubscription/listInvoices/getInvoicePdf()` (`updateSubscription/portal/checkout/pause/resume` gated) |
-| **J30** | RGPD | `Account::requestExport/downloadExport/updateNotifications()` (`scheduleDeletion/cancelDeletion` gated) |
-| **J-cabinets** | Cabinets (illustrative) | `Cabinet::all()` (requires `cabinet_*` plan) |
+| **J29** | Facturino billing (read-only) | `Billing::retrieveSubscription/listInvoices/getInvoicePdf()` |
+| **J30** | RGPD | `Account::requestExport/downloadExport()` |
 
 > **MFA** (`Mfa::*`) is part of the SDK but belongs to the web app flow, not a
 > typical SaaS-API integration, so it is documented but not exercised here.

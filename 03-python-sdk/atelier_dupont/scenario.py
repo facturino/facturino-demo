@@ -9,12 +9,14 @@ Conventions enforced throughout (see docs/SCENARIO.md):
   * amounts are integer centimes (10000 = 100.00 EUR);
   * VAT rates are centipercent (2000 = 20.00 %);
   * POST creations carry a stable Idempotency-Key so the run is replayable;
-  * list endpoints use cursor pagination (the SDK auto-follows ``has_more``);
-  * destructive / billing operations are guarded behind an explicit flag.
+  * list endpoints use cursor pagination (the SDK auto-follows ``has_more``).
 """
 
 from __future__ import annotations
 
+import base64
+import os
+import secrets
 from typing import Any, Optional
 
 import facturino
@@ -28,15 +30,12 @@ from .helpers import (
     run_step,
 )
 
-# A run id namespaces the idempotency keys for this scenario execution.
-# Keep it stable to make the whole journey replayable (lookup-or-create);
-# change it to force a brand-new set of resources.
-RUN_ID = "v1"
-
-# When True, the few genuinely destructive / billing-mutating calls are
-# executed. Off by default so running the demo never charges a card,
-# schedules an account deletion, or revokes a teammate.
-RUN_DESTRUCTIVE = False
+# A run id namespaces the idempotency keys for this scenario execution. A fresh
+# id per run keeps each execution self-contained: re-running creates a new set
+# of resources instead of colliding with a previous run's lifecycle state (e.g.
+# an already-converted quote that can no longer be sent). Pin DEMO_RUN_ID to
+# replay a specific run's idempotency keys.
+RUN_ID = os.environ.get("DEMO_RUN_ID") or secrets.token_hex(4)
 
 
 # --------------------------------------------------------------------------- #
@@ -64,7 +63,7 @@ def _post_with_key(client: facturino.Client, path: str, body: dict[str, Any], ke
 
 
 def phase_a_bootstrap(client: facturino.Client, log: list[dict[str, Any]]) -> dict[str, Any]:
-    """A. Who am I, emitting company, PA connection (BYOPA), quotas."""
+    """A. Who am I, emitting company, settings, quotas."""
     state: dict[str, Any] = {}
 
     # A1 — account.retrieve: verify key, plan, livemode.
@@ -82,7 +81,7 @@ def phase_a_bootstrap(client: facturino.Client, log: list[dict[str, Any]]) -> di
             lambda: _post_with_key(
                 client,
                 "/v1/companies",
-                {"name": "Atelier Dupont SAS", "siret": "39204939000019", "legalForm": "5710"},
+                {"name": "Atelier Dupont SAS", "siret": "39204939000019", "legalForm": {"code": "5710"}},
                 idempotency_key("create-company", RUN_ID),
             ),
             log,
@@ -91,44 +90,18 @@ def phase_a_bootstrap(client: facturino.Client, log: list[dict[str, Any]]) -> di
     state["company_id"] = company_id
     run_step("A2 companies.get", lambda: client.companies.get(company_id), log)
 
-    # A2 — invoicing settings: VAT regime + numbering format.
-    run_step(
-        "A2 companies.update_invoicing_settings",
-        lambda: client.companies.update_invoicing_settings(
-            company_id,
-            numberingFormat="F-{YYYY}-{SEQ:5}",
-            defaultPaymentTermsDays=30,
-            defaultVatRate=2000,  # 20.00 %
-        ),
-        log,
-    )
+    # A2b — Company admin: general terms (CGV) round-trip + onboarding milestone.
+    def _company_admin() -> dict[str, Any]:
+        cgv = base64.b64encode(b"%PDF-1.4\n% Conditions generales de vente (demo)\n").decode()
+        client.companies.upload_cgv(company_id, cgv)
+        client.companies.get_cgv(company_id)
+        client.companies.delete_cgv(company_id)
+        return client.companies.add_milestone(company_id, "firstInvoice")
 
-    # A2 — accounting + reminder settings (best-effort; plan-gated reads ok).
-    _optional(log, "A2 settings.retrieve_accounting", lambda: client.settings.retrieve_accounting(company_id))
-    _optional(
-        log,
-        "A2 settings.update_accounting",
-        lambda: client.settings.update_accounting(company_id, salesAccount="706000", vatAccount="445710"),
-    )
-    _optional(log, "A2 settings.retrieve_reminders", lambda: client.settings.retrieve_reminders(company_id))
-    _optional(
-        log,
-        "A2 settings.update_reminders",
-        lambda: client.settings.update_reminders(company_id, schedule=[7, 15, 30], enabled=True),
-    )
+    _optional(log, "A2b companies CGV upload/get/delete + add_milestone", _company_admin)
 
-    # A3 — PA connection (BYOPA). Credentials come from the client's own PA
-    # account; the values below are placeholders for the sandbox connector.
-    _optional(
-        log,
-        "A3 companies.connect_pa",
-        lambda: client.companies.connect_pa(
-            company_id,
-            provider="mock",
-            credentials={"clientId": "demo", "clientSecret": "demo-secret"},
-        ),
-    )
-    _optional(log, "A3 companies.test_pa_connection", lambda: client.companies.test_pa_connection(company_id))
+    # Company settings (numbering, accounting, reminders) are configured in the
+    # Facturino app console — the API consumes them but does not manage them.
 
     # A3 — reference tables used to power company / customer forms.
     _optional(log, "A3 reference.list_legal_forms", lambda: first(client.reference.list_legal_forms(search="SAS")))
@@ -157,6 +130,7 @@ def phase_b_catalog(client: facturino.Client, log: list[dict[str, Any]], state: 
                 "name": "Abonnement maintenance mensuel",
                 "unitPrice": 9900,  # 99.00 EUR
                 "vatRate": 2000,
+                "vatCode": "S",
                 "unit": "month",
                 "reference": "SUB-MAINT",
             },
@@ -173,6 +147,7 @@ def phase_b_catalog(client: facturino.Client, log: list[dict[str, Any]], state: 
                 "name": "Prestation atelier (jour)",
                 "unitPrice": 60000,  # 600.00 EUR
                 "vatRate": 2000,
+                "vatCode": "S",
                 "unit": "day",
                 "reference": "SVC-DAY",
             },
@@ -269,8 +244,9 @@ def phase_c_quote(client: facturino.Client, log: list[dict[str, Any]], state: di
             "/v1/quotes",
             {
                 "customerId": customer_id,
+                "validityDays": 30,
                 "lines": [
-                    {"description": "Prestation atelier (3 jours)", "quantity": 3, "unitPrice": 60000, "vatRate": 2000},
+                    {"description": "Prestation atelier (3 jours)", "quantity": "3", "unitPrice": 60000, "vatRate": 2000, "vatCode": "S", "unit": "unit"},
                 ],
                 "notes": "Devis valable 30 jours.",
             },
@@ -299,21 +275,26 @@ def phase_c_quote(client: facturino.Client, log: list[dict[str, Any]], state: di
     state["converted_invoice_id"] = converted.get("id")
 
     # C8 — validate.run on a candidate invoice payload (no resource created).
+    # The endpoint accepts the same fields as invoices.create (EN16931 + CIUS-FR
+    # dry-run) and returns {valid, warnings} without persisting anything.
     _optional(
         log,
         "C8 validate.run (invoice)",
         lambda: client.validate.run(
-            kind="invoice",
-            invoice={
-                "customerId": customer_id,
-                "lines": [
-                    {"description": "Prestation atelier (jour)", "quantity": 1, "unitPrice": 60000, "vatRate": 2000},
-                ],
+            customerId=customer_id,
+            buyer={
+                "companyName": "Menuiserie Bernard SARL",
+                "siret": "55208131766522",
+                "vatNumber": "FR40552081317",
+                "address": {"line1": "12 rue des Artisans", "postalCode": "69007", "city": "Lyon", "country": "FR"},
             },
+            lines=[
+                {"description": "Prestation atelier (jour)", "quantity": "1", "unitPrice": 60000, "vatRate": 2000, "vatCode": "S", "unit": "unit"},
+            ],
+            dates={"issued": "2026-06-29", "due": "2026-07-29"},
+            payment={"terms": "Paiement a 30 jours", "termsDays": 30, "method": "transfer", "latePaymentRate": "10.00", "collectionFee": "40.00"},
         ),
     )
-    # A cheap structural check too, to show the other validate shapes.
-    _optional(log, "C8 validate.run (siret)", lambda: client.validate.run(kind="siret", value="55208131766522"))
 
 
 # --------------------------------------------------------------------------- #
@@ -334,12 +315,19 @@ def phase_d_invoice(client: facturino.Client, log: list[dict[str, Any]], state: 
             "/v1/invoices",
             {
                 "customerId": customer_id,
+                "buyer": {
+                    "companyName": "Menuiserie Bernard SARL",
+                    "siret": "55208131766522",
+                    "vatNumber": "FR40552081317",
+                    "address": {"line1": "12 rue des Artisans", "postalCode": "69007", "city": "Lyon", "country": "FR"},
+                },
                 "lines": [
-                    {"description": "Prestation atelier (jour)", "quantity": 2, "unitPrice": 60000, "vatRate": 2000},
-                    {"description": "Abonnement maintenance (1 mois)", "quantity": 1, "unitPrice": 9900, "vatRate": 2000},
+                    {"description": "Prestation atelier (jour)", "quantity": "2", "unitPrice": 60000, "vatRate": 2000, "vatCode": "S", "unit": "unit"},
+                    {"description": "Abonnement maintenance (1 mois)", "quantity": "1", "unitPrice": 9900, "vatRate": 2000, "vatCode": "S", "unit": "unit"},
                 ],
+                "dates": {"issued": "2026-06-29", "due": "2026-07-29"},
                 "purchaseOrderNumber": "PO-2026-0042",
-                "payment": {"terms": "net_30", "method": "transfer"},
+                "payment": {"terms": "Paiement a 30 jours", "termsDays": 30, "method": "transfer", "latePaymentRate": "10.00", "collectionFee": "40.00"},
                 "notes": "Merci pour votre confiance.",
             },
             idempotency_key("create-invoice", RUN_ID),
@@ -388,6 +376,12 @@ def phase_d_invoice(client: facturino.Client, log: list[dict[str, Any]], state: 
         ),
     )
     _optional(log, "D12 invoices.create_portal_link", lambda: client.invoices.create_portal_link(invoice_id))
+    # Signed payment token for an embedded/headless checkout (Pro+).
+    _optional(log, "D12 invoices.create_payment_token", lambda: client.invoices.create_payment_token(invoice_id))
+
+    # D12 — dunning before settlement: a reminder can only be sent while the
+    # invoice is still unpaid, so send it before recording the payment.
+    _optional(log, "D12 invoices.remind", lambda: client.invoices.remind(invoice_id))
 
     total = _invoice_total(finalized)
     run_step(
@@ -395,15 +389,14 @@ def phase_d_invoice(client: facturino.Client, log: list[dict[str, Any]], state: 
         lambda: _post_with_key(
             client,
             f"/v1/invoices/{invoice_id}/payments",
-            {"amount": total, "method": "transfer", "reference": "VIR-2026-0042"},
+            {"amount": total, "method": "transfer", "reference": "VIR-2026-0042", "paidAt": "2026-06-29"},
             idempotency_key("record-payment", RUN_ID),
         ),
         log,
     )
     run_step("D12 payments.list", lambda: list(client.payments.list(invoice_id)), log)
 
-    # D13 — reminder + event history.
-    _optional(log, "D13 invoices.remind", lambda: client.invoices.remind(invoice_id))
+    # D13 — event history.
     run_step("D13 invoices.list_events", lambda: client.invoices.list_events(invoice_id), log)
 
     # D14 — audit trail (hash chain + PDF).
@@ -437,13 +430,15 @@ def phase_e_recurring(client: facturino.Client, log: list[dict[str, Any]], state
                 "customerId": customer_id,
                 "frequency": "monthly",
                 "startDate": "2026-06-01",
+                "nextGenerationDate": "2026-07-01",
                 "autoFinalize": True,
                 "autoSend": True,
                 "templateInvoice": {
-                    "lines": [
-                        {"description": "Abonnement maintenance mensuel", "quantity": 1, "unitPrice": 9900, "vatRate": 2000},
+                    "items": [
+                        {"description": "Abonnement maintenance mensuel", "quantity": "1", "unitPrice": 9900, "vatRate": 2000, "vatCode": "S", "unit": "unit"},
                     ],
-                    "payment": {"terms": "net_30", "method": "transfer"},
+                    "paymentMethod": "transfer",
+                    "paymentTermsDays": 30,
                 },
             },
             idempotency_key("create-recurring", RUN_ID),
@@ -485,10 +480,12 @@ def phase_f_credit_note(client: facturino.Client, log: list[dict[str, Any]], sta
             {
                 "customerId": customer_id,
                 "relatedInvoiceId": invoice_id,
+                "creditNoteType": "partial",
                 "reasonCode": "quality",
                 "reason": "Geste commercial sur une demi-journee",
-                "lines": [
-                    {"description": "Remise prestation atelier", "quantity": 1, "unitPrice": 30000, "vatRate": 2000},
+                "dates": {"issued": "2026-06-29"},
+                "items": [
+                    {"description": "Remise prestation atelier", "quantity": "1", "unitPrice": 30000, "vatRate": 2000, "vatCode": "S", "unit": "unit"},
                 ],
             },
             idempotency_key("create-credit-note", RUN_ID),
@@ -539,9 +536,10 @@ def phase_g_received(client: facturino.Client, log: list[dict[str, Any]], state:
         log,
         "G18 invoices.create_incoming",
         lambda: client.invoices.create_incoming(
-            supplier={"name": "Fournisseur Bois & Co", "siret": "81234567800013"},
-            lines=[{"description": "Planches de chene", "quantity": 10, "unitPrice": 4500, "vatRate": 2000}],
-            dates={"issued": "2026-05-20", "due": "2026-06-20"},
+            senderName="Fournisseur Bois & Co",
+            senderSiret="81234567800013",
+            amount=54000,  # total incl. VAT, in integer cents
+            reference="F-2026-118",
         ),
     )
     _optional(log, "G18 invoices.list_incoming", lambda: list(client.invoices.list_incoming(limit=25)))
@@ -560,7 +558,7 @@ def phase_g_received(client: facturino.Client, log: list[dict[str, Any]], state:
         _optional(
             log,
             "G18 received_invoices.record_payment",
-            lambda: client.received_invoices.record_payment(rid, amount=45000, method="transfer"),
+            lambda: client.received_invoices.record_payment(rid, amount=45000, method="transfer", paid_at="2026-06-29"),
         )
         log.append(
             {
@@ -636,7 +634,7 @@ def phase_h_webhooks(client: facturino.Client, log: list[dict[str, Any]], state:
 
 
 def phase_i_accounting(client: facturino.Client, log: list[dict[str, Any]], state: dict[str, Any]) -> None:
-    """I. Reporting, exports (FEC / invoices / RGPD), e-reporting, archives, notifications."""
+    """I. Reporting, exports (FEC / invoices / RGPD), e-reporting, archives."""
     period = {"period_start": "2026-01-01", "period_end": "2026-12-31"}
 
     # I22 — reporting (Essential+).
@@ -653,12 +651,13 @@ def phase_i_accounting(client: facturino.Client, log: list[dict[str, Any]], stat
         fec_job = extract_job_id(fec)
         if fec_job:
             _optional(log, "I23 exports.get_fec_status", lambda: client.exports.get_fec_status(fec_job))
-    _optional(log, "I23 exports.export_invoices", client.exports.export_invoices)
-    rgpd = _optional(log, "I23 exports.export_rgpd", client.exports.export_rgpd)
-    if isinstance(rgpd, dict):
-        rgpd_job = extract_job_id(rgpd)
-        if rgpd_job:
-            _optional(log, "I23 exports.get_status", lambda: client.exports.get_status(rgpd_job))
+    _optional(
+        log,
+        "I23 exports.export_invoices",
+        lambda: client.exports.export_invoices(period_start="2026-01-01", period_end="2026-12-31"),
+    )
+    # RGPD (article 20) data export is account-level — covered in phase J via
+    # account.request_export + account.download_export.
 
     # I24 — e-reporting declarations (B2C / international).
     declaration = _optional(
@@ -685,21 +684,6 @@ def phase_i_accounting(client: facturino.Client, log: list[dict[str, Any]], stat
     elif invoice_id:
         _optional(log, "I25 archives.get", lambda: client.archives.get(invoice_id))
 
-    # I26 — product notifications (the in-app bell) + per-event preferences.
-    notifications = _optional(log, "I26 notifications.list", lambda: list(client.notifications.list(limit=25)))
-    notif = notifications[0] if isinstance(notifications, list) and notifications else None
-    if isinstance(notif, dict) and notif.get("id"):
-        _optional(log, "I26 notifications.mark_read", lambda: client.notifications.mark_read(notif["id"]))
-    _optional(log, "I26 notifications.mark_all_read", client.notifications.mark_all_read)
-    _optional(log, "I26 notifications.retrieve_preferences", client.notifications.retrieve_preferences)
-    _optional(
-        log,
-        "I26 notifications.update_preferences",
-        lambda: client.notifications.update_preferences(
-            preferences={"invoice_paid": {"email": False, "inApp": True, "push": True}}
-        ),
-    )
-
 
 # --------------------------------------------------------------------------- #
 # Phase J — Account administration
@@ -707,58 +691,7 @@ def phase_i_accounting(client: facturino.Client, log: list[dict[str, Any]], stat
 
 
 def phase_j_admin(client: facturino.Client, log: list[dict[str, Any]], state: dict[str, Any]) -> None:
-    """J. API keys, members, Facturino billing, RGPD, plus the illustrative surfaces."""
-    company_id = state["company_id"]
-
-    # J27 — API keys: create a restricted worker key, list/get, roll, revoke.
-    worker_key = _optional(
-        log,
-        "J27 api_keys.create",
-        lambda: _post_with_key(
-            client,
-            "/v1/api-keys",
-            {"name": "worker-readonly (demo)", "permissions": ["invoices:read", "customers:read"]},
-            idempotency_key("create-api-key", RUN_ID),
-        ),
-    )
-    _optional(log, "J27 api_keys.list", client.api_keys.list)
-    key_id = worker_key.get("id") if isinstance(worker_key, dict) else None
-    if isinstance(key_id, str):
-        _optional(log, "J27 api_keys.get", lambda: client.api_keys.get(key_id))
-        if RUN_DESTRUCTIVE:
-            rolled = _optional(log, "J27 api_keys.roll", lambda: client.api_keys.roll(key_id))
-            rolled_id = rolled["id"] if isinstance(rolled, dict) and isinstance(rolled.get("id"), str) else key_id
-            _optional(log, "J27 api_keys.revoke", lambda: client.api_keys.revoke(rolled_id))
-        else:
-            log.append({"step": "J27 api_keys.roll / revoke (guarded by RUN_DESTRUCTIVE)", "ok": True})
-
-    # J28 — members. Invite is real (sends an email); update/revoke guarded.
-    _optional(log, "J28 members.list", lambda: client.members.list(company_id))
-    if RUN_DESTRUCTIVE:
-        invited = _optional(
-            log,
-            "J28 members.invite",
-            lambda: client.members.invite(company_id, email="dev@atelier-dupont.fr", role="editor"),
-        )
-        member_id = invited.get("id") if isinstance(invited, dict) else None
-        if member_id:
-            _optional(log, "J28 members.get", lambda: client.members.get(company_id, member_id))
-            _optional(
-                log,
-                "J28 members.update_role",
-                lambda: client.members.update_role(company_id, member_id, "viewer"),
-            )
-            _optional(
-                log,
-                "J28 members.resend_invitation",
-                lambda: client.members.resend_invitation(company_id, member_id),
-            )
-            _optional(log, "J28 members.revoke", lambda: client.members.revoke(company_id, member_id))
-    else:
-        log.append(
-            {"step": "J28 members.invite / get / update_role / resend / revoke (guarded by RUN_DESTRUCTIVE)", "ok": True}
-        )
-
+    """J. Facturino billing (read-only) and the RGPD data export."""
     # J29 — Facturino's own subscription billing.
     _optional(log, "J29 billing.retrieve_subscription", client.billing.retrieve_subscription)
     _optional(log, "J29 billing.list_invoices", lambda: client.billing.list_invoices(limit=10))
@@ -766,36 +699,12 @@ def phase_j_admin(client: facturino.Client, log: list[dict[str, Any]], state: di
     bi = first(billing_invoices) if billing_invoices else None
     if isinstance(bi, dict) and bi.get("id"):
         _optional(log, "J29 billing.get_invoice_pdf", lambda: client.billing.get_invoice_pdf(bi["id"]))
-    if RUN_DESTRUCTIVE:
-        _optional(log, "J29 billing.update_subscription", lambda: client.billing.update_subscription(plan="pro", cycle="annual"))
-        _optional(log, "J29 billing.checkout", lambda: client.billing.checkout(plan="pro", success_url=_public(state) + "/ok", cancel_url=_public(state) + "/ko"))
-        _optional(log, "J29 billing.portal", lambda: client.billing.portal(return_url=_public(state)))
-        _optional(log, "J29 billing.pause", lambda: client.billing.pause(months=1))
-        _optional(log, "J29 billing.resume", client.billing.resume)
-    else:
-        log.append(
-            {"step": "J29 billing.update_subscription / checkout / portal / pause / resume (guarded by RUN_DESTRUCTIVE)", "ok": True}
-        )
 
-    # J30 — RGPD: request + download a data export; deletion guarded.
+    # J30 — RGPD: request + download a data export.
     export = _optional(log, "J30 account.request_export", client.account.request_export)
     export_id = export.get("exportId") if isinstance(export, dict) else None
     if export_id:
         _optional(log, "J30 account.download_export", lambda: client.account.download_export(export_id))
-    _optional(
-        log,
-        "J30 account.update_notifications",
-        lambda: client.account.update_notifications(marketing=False, productUpdates=True),
-    )
-    if RUN_DESTRUCTIVE:
-        _optional(log, "J30 account.schedule_deletion", client.account.schedule_deletion)
-        _optional(log, "J30 account.cancel_deletion", client.account.cancel_deletion)
-    else:
-        log.append({"step": "J30 account.schedule_deletion / cancel_deletion (guarded by RUN_DESTRUCTIVE)", "ok": True})
-
-    # Out-of-band surfaces, documented in SCENARIO.md, called illustratively.
-    _optional(log, "(cabinets) cabinets.list — requires a cabinet_* plan", lambda: list(client.cabinets.list(limit=5)))
-    log.append({"step": "(mfa) mfa.* — handled by the Facturino web app, not run from a server worker", "ok": True})
 
 
 # --------------------------------------------------------------------------- #

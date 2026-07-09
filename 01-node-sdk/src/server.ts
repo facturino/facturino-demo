@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 
 import { loadConfig, createClient } from './config.js'
 import { describeError, log } from './lib.js'
-import { Scenario, runScenario, type RunFlags } from './scenario.js'
+import { Scenario, runScenario } from './scenario.js'
 import { handleWebhook } from './webhook.js'
 
 /**
@@ -12,24 +12,10 @@ import { handleWebhook } from './webhook.js'
  *   POST /run             — the full A→J scenario
  *   POST /run/:phase      — a single phase (bootstrap, catalogue, customer, …)
  *   POST /webhooks        — inbound Facturino events (signature-verified)
- *
- * Sensitive calls (account deletion, real Stripe checkout, member/key revoke,
- * PA disconnect) stay disabled unless explicitly enabled via env flags:
- *   ALLOW_ACCOUNT_DELETION=1 ALLOW_BILLING_MUTATIONS=1
- *   ALLOW_MEMBER_MUTATIONS=1 ALLOW_PA_DISCONNECT=1
  */
 
 const config = loadConfig()
 const facturino = createClient(config)
-
-function readFlags(): RunFlags {
-  return {
-    allowAccountDeletion: process.env.ALLOW_ACCOUNT_DELETION === '1',
-    allowBillingMutations: process.env.ALLOW_BILLING_MUTATIONS === '1',
-    allowMemberMutations: process.env.ALLOW_MEMBER_MUTATIONS === '1',
-    allowPaDisconnect: process.env.ALLOW_PA_DISCONNECT === '1',
-  }
-}
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' })
@@ -49,7 +35,6 @@ const PHASES = [
   'webhooks',
   'accounting',
   'administration',
-  'illustrative',
 ] as const
 type Phase = (typeof PHASES)[number]
 
@@ -57,8 +42,8 @@ type Phase = (typeof PHASES)[number]
  * Run a single phase. Most phases depend on resources produced by earlier
  * ones, so when invoked standalone we rebuild the minimal prerequisites first.
  */
-async function runPhase(phase: Phase, flags: RunFlags): Promise<void> {
-  const scenario = new Scenario(facturino, config, flags)
+async function runPhase(phase: Phase): Promise<void> {
+  const scenario = new Scenario(facturino, config)
 
   switch (phase) {
     case 'bootstrap':
@@ -75,9 +60,6 @@ async function runPhase(phase: Phase, flags: RunFlags): Promise<void> {
       return
     case 'accounting':
       await scenario.accounting()
-      return
-    case 'illustrative':
-      await scenario.illustrative()
       return
   }
 
@@ -151,9 +133,8 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
 
   // Full scenario.
   if (method === 'POST' && path === '/run') {
-    const flags = readFlags()
     try {
-      await runScenario(facturino, config, flags)
+      await runScenario(facturino, config)
       json(res, 200, { ok: true })
     } catch (err) {
       log.warn(describeError(err))
@@ -170,7 +151,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return
     }
     try {
-      await runPhase(phase, readFlags())
+      await runPhase(phase)
       json(res, 200, { ok: true, phase })
     } catch (err) {
       log.warn(describeError(err))

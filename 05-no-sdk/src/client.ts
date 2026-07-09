@@ -158,9 +158,13 @@ export class FacturinoClient {
     };
 
     let serialisedBody: string | undefined;
-    if (options.body !== undefined && method !== 'GET' && method !== 'DELETE') {
+    if (method !== 'GET' && method !== 'DELETE') {
+      // The API requires Content-Type: application/json on every write, even a
+      // body-less POST such as /finalize or /quotes/:id/send.
       headers['Content-Type'] = 'application/json';
-      serialisedBody = JSON.stringify(options.body);
+      if (options.body !== undefined) {
+        serialisedBody = JSON.stringify(options.body);
+      }
     }
 
     // The Idempotency-Key is what makes a retried POST safe. We send the SAME

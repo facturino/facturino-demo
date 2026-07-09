@@ -2,9 +2,9 @@
  * The "Atelier Dupont" scenario — phases A → J.
  *
  * One backend, 100% of its billing through Facturino: bootstrap the account,
- * connect a PA (BYOPA), build a catalogue and a customer, quote → invoice →
- * deposit → payment, a recurring subscription, a credit note, an incoming
- * purchase invoice, webhooks, accounting exports, and account admin.
+ * build a catalogue and a customer, quote → invoice → deposit → payment, a
+ * recurring subscription, a credit note, an incoming purchase invoice,
+ * webhooks, accounting exports, and account admin.
  *
  * Every call is plain HTTP through {@link FacturinoClient}. Read it next to
  * docs/SCENARIO.md — each `phaseX()` maps to a lettered section there.
@@ -12,22 +12,23 @@
  * Conventions enforced here (see CONVENTIONS in SCENARIO.md):
  *   • Amounts are integer CENTS (10000 = €100.00).
  *   • VAT rates are integer HUNDREDTHS OF A PERCENT (2000 = 20.00%).
- *   • Idempotency-Key on every creation POST, deterministic per logical op so
- *     a re-run reuses the same key (the scenario is replayable).
+ *   • Idempotency-Key on every creation POST. Each run draws a fresh run id, so
+ *     re-running is safe; within a run the key is stable, so a retried POST
+ *     never creates a duplicate.
  *   • Lists are cursor-paginated (starting_after / has_more).
  *   • Errors carry request_id — we log it for support.
  *
- * Destructive / billing-real operations (account.scheduleDeletion, real
- * billing.checkout, members.revoke, apiKeys.revoke, …) are CODED but kept
- * behind an explicit guard so a run never damages a live account. Set
- * `ALLOW_DESTRUCTIVE=1` to actually fire them.
+ * A few operations transmit to the DGFiP (ereporting.submit) or mutate
+ * supplier-invoice state (received-invoice refuse/suspend); they are CODED but
+ * kept behind an explicit guard so a run never has irreversible side effects.
+ * Set `ALLOW_DESTRUCTIVE=1` to actually fire them.
  */
 import { randomUUID } from 'node:crypto';
 import type { Config } from './config.js';
 import { FacturinoClient, FacturinoError, idempotencyKey } from './client.js';
 import { phase, step, detail, warn, fail, resetSteps } from './log.js';
 
-/** Set ALLOW_DESTRUCTIVE=1 to run guarded destructive/billing-real calls. */
+/** Set ALLOW_DESTRUCTIVE=1 to run guarded destructive operations. */
 const ALLOW_DESTRUCTIVE = process.env['ALLOW_DESTRUCTIVE'] === '1';
 
 /** Minimal shapes for the resources we touch (the API returns much more). */
@@ -92,15 +93,26 @@ interface ScenarioContext {
 export class Scenario {
   private readonly client: FacturinoClient;
   private readonly config: Config;
+  /** Fresh per run() so re-running never collides on a stale Idempotency-Key. */
+  private runId = '';
 
   constructor(config: Config) {
     this.config = config;
     this.client = new FacturinoClient(config);
   }
 
+  /**
+   * Build an Idempotency-Key scoped to the current run. Stable across retries
+   * of the same logical POST within one run; unique across runs.
+   */
+  private idem(operation: string, ...parts: string[]): string {
+    return idempotencyKey(operation, this.runId, ...parts);
+  }
+
   /** Run the whole A→J parcours. Returns the resulting context. */
   async runAll(): Promise<ScenarioContext> {
     resetSteps();
+    this.runId = randomUUID().slice(0, 8);
     const companyId = await this.resolveCompanyId();
     const ctx: ScenarioContext = { companyId };
 
@@ -113,7 +125,7 @@ export class Scenario {
     await this.phaseG(ctx);
     await this.phaseH(ctx);
     await this.phaseI(ctx);
-    await this.phaseJ(ctx);
+    await this.phaseJ();
 
     console.log('\n\x1b[1m\x1b[38;5;46m✓ Scenario complete.\x1b[0m');
     return ctx;
@@ -135,7 +147,7 @@ export class Scenario {
     }>('/account');
     detail(`plan=${account.plan ?? '?'} livemode=${account.livemode ?? this.config.livemode}`);
 
-    // A.2 — companies.list / get, then invoicing + accounting + reminder settings.
+    // A.2 — companies.list / get.
     step('companies.list → GET /companies');
     const companies = await this.client.list<Company>('/companies', { limit: 10 });
     detail(`${companies.data.length} company(ies)`);
@@ -144,63 +156,36 @@ export class Scenario {
     const company = await this.client.get<Company>(`/companies/${ctx.companyId}`);
     detail(`company=${company.name ?? ctx.companyId}`);
 
-    step('companies.updateInvoicingSettings → PATCH /companies/:id/invoicing-settings');
-    await this.client.patch(`/companies/${ctx.companyId}/invoicing-settings`, {
-      // Régime TVA + numérotation. The endpoint accepts a free-form settings map.
-      vatRegime: 'normal',
-      numbering: { prefix: 'AD', resetPolicy: 'yearly' },
-    });
-    detail('régime TVA = normal, préfixe de numérotation = AD');
+    // A.2b — Company admin: general terms (CGV) round-trip + onboarding milestone.
+    step('companies.uploadCgv → POST /companies/:id/cgv');
+    try {
+      // CGV are sent as a base64-encoded PDF.
+      const cgvPdf = Buffer.from('%PDF-1.4\n% Conditions générales de vente (démo)\n').toString('base64');
+      await this.client.post(
+        `/companies/${ctx.companyId}/cgv`,
+        { content: cgvPdf },
+        this.idem('cgv', ctx.companyId),
+      );
+      step('companies.getCgv → GET /companies/:id/cgv (URL signée)');
+      await this.client.get(`/companies/${ctx.companyId}/cgv`);
+      step('companies.deleteCgv → DELETE /companies/:id/cgv');
+      await this.client.delete(`/companies/${ctx.companyId}/cgv`);
+      step('companies.addMilestone → POST /companies/:id/milestones');
+      await this.client.post(
+        `/companies/${ctx.companyId}/milestones`,
+        { milestone: 'firstInvoice' },
+        this.idem('milestone', ctx.companyId),
+      );
+      detail('CGV upload/get/delete + jalon firstInvoice');
+    } catch (err) {
+      this.softError('companies.cgv/milestone', err);
+    }
 
-    step('settings.retrieveAccounting → GET /companies/:id/settings/accounting');
-    await this.client.get(`/companies/${ctx.companyId}/settings/accounting`);
-    step('settings.updateAccounting → PATCH /companies/:id/settings/accounting');
-    await this.client.patch(`/companies/${ctx.companyId}/settings/accounting`, {
-      // Plan comptable général: customer + revenue account roots.
-      salesAccount: '707000',
-      vatAccount: '445710',
-    });
-
-    step('settings.retrieveReminders → GET /companies/:id/settings/reminders');
-    await this.client.get(`/companies/${ctx.companyId}/settings/reminders`);
-    step('settings.updateReminders → PATCH /companies/:id/settings/reminders');
-    await this.client.patch(`/companies/${ctx.companyId}/settings/reminders`, {
-      // Dunning cadence J+7 / J+15 / J+30 — see backend Cloud Tasks schedule.
-      enabled: true,
-      schedule: [7, 15, 30],
-    });
-
-    // A.3 — Reference data (open data) + BYOPA connection.
+    // A.3 — Reference data (open data).
     step('reference.listLegalForms → GET /reference/legal-forms');
     await this.client.get('/reference/legal-forms');
     step('reference.listNafCodes → GET /reference/naf-codes');
     await this.client.get('/reference/naf-codes');
-
-    step('companies.connectPA → POST /companies/:id/pa-connection');
-    try {
-      await this.client.post(
-        `/companies/${ctx.companyId}/pa-connection`,
-        {
-          // BYOPA: the client brings its own PA credentials. Test-mode values.
-          provider: 'afnor_generic',
-          clientId: 'demo-client-id',
-          clientSecret: 'demo-client-secret',
-          customBaseUrl: 'https://pa-sandbox.example.com',
-        },
-        idempotencyKey('connectPA', ctx.companyId),
-      );
-      detail('PA afnor_generic connectée (sandbox)');
-    } catch (err) {
-      this.softError('connectPA', err);
-    }
-
-    step('companies.testPAConnection → POST /companies/:id/pa-connection/test');
-    try {
-      await this.client.post(`/companies/${ctx.companyId}/pa-connection/test`);
-      detail('connexion PA OK');
-    } catch (err) {
-      this.softError('testPAConnection', err);
-    }
 
     // A.4 — usage.retrieve: consumption vs plan limits.
     step('usage.retrieve → GET /usage');
@@ -229,7 +214,7 @@ export class Scenario {
         vatCode: 'S', // taux standard
         unit: 'month',
       },
-      idempotencyKey('product', 'SUB-MONTHLY'),
+      this.idem('product', 'SUB-MONTHLY'),
     );
     ctx.subscriptionProductId = subscription.id;
     detail(`product=${subscription.id}`);
@@ -245,7 +230,7 @@ export class Scenario {
         vatCode: 'S',
         unit: 'hour',
       },
-      idempotencyKey('product', 'CONSULT-H'),
+      this.idem('product', 'CONSULT-H'),
     );
     ctx.consultingProductId = consulting.id;
     detail(`product=${consulting.id}`);
@@ -283,7 +268,7 @@ export class Scenario {
         {
           csv: 'name,reference,unitPrice,vatRate,vatCode,unit\nFormation,FORM-D,80000,2000,S,day\n',
         },
-        idempotencyKey('products.import', 'FORM-D'),
+        this.idem('products.import', 'FORM-D'),
       );
       detail('import CSV OK');
     } catch (err) {
@@ -317,6 +302,8 @@ export class Scenario {
         {
           name: 'Café des Artisans SARL',
           type: 'company',
+          // Email principal — destinataire des relances (invoices.remind).
+          email: 'compta@cafe-des-artisans.example',
           siret: '55208131766522',
           vatNumber: 'FR40552081317',
           address: {
@@ -329,7 +316,7 @@ export class Scenario {
           contacts: [{ email: 'compta@cafe-des-artisans.example', role: 'billing' }],
           paymentTerms: 30,
         },
-        idempotencyKey('customer', '55208131766522'),
+        this.idem('customer', '55208131766522'),
       );
       ctx.customerId = customer.id;
       detail(`client créé: ${customer.id}`);
@@ -339,7 +326,12 @@ export class Scenario {
     await this.client.get<Customer>(`/customers/${ctx.customerId}`);
 
     step('customers.update → PATCH /customers/:id');
-    await this.client.patch(`/customers/${ctx.customerId}`, { notes: 'Client fidèle depuis 2024' });
+    // Backfill the email too, so a customer reused from an earlier run can
+    // still receive reminders (invoices.remind requires it).
+    await this.client.patch(`/customers/${ctx.customerId}`, {
+      notes: 'Client fidèle depuis 2024',
+      email: 'compta@cafe-des-artisans.example',
+    });
 
     step('customers.exportCsv → GET /customers/export');
     await this.client.get<string>('/customers/export');
@@ -348,9 +340,9 @@ export class Scenario {
       await this.client.post(
         '/customers/import',
         {
-          csv: 'name,type,siret,line1,postalCode,city,country\nBoulangerie Martin,company,81234567800019,3 av. Gambetta,69003,Lyon,FR\n',
+          csv: 'name,type,siret,line1,postalCode,city,country\nBoulangerie Martin,company,55208131766522,3 av. Gambetta,69003,Lyon,FR\n',
         },
-        idempotencyKey('customers.import', '81234567800019'),
+        this.idem('customers.import', '55208131766522'),
       );
     } catch (err) {
       this.softError('customers.importCsv', err);
@@ -394,7 +386,7 @@ export class Scenario {
         },
         notes: 'Devis valable 30 jours.',
       },
-      idempotencyKey('quote', customerId, this.today()),
+      this.idem('quote', customerId, this.today()),
     );
     ctx.quoteId = quote.id;
     detail(`quote=${quote.id} status=${quote.status}`);
@@ -438,7 +430,7 @@ export class Scenario {
       const cloned = await this.client.post<Quote>(
         `/quotes/${quote.id}/clone`,
         undefined,
-        idempotencyKey('quote.clone', quote.id),
+        this.idem('quote.clone', quote.id),
       );
       detail(`devis cloné (brouillon): ${cloned.id} status=${cloned.status}`);
     } catch (err) {
@@ -480,7 +472,7 @@ export class Scenario {
       const invoice = await this.client.post<Invoice>(
         '/invoices',
         this.sampleInvoicePayload(customerId),
-        idempotencyKey('invoice', customerId, this.today()),
+        this.idem('invoice', customerId, this.today()),
       );
       ctx.invoiceId = invoice.id;
       detail(`invoice=${invoice.id} status=${invoice.status}`);
@@ -495,7 +487,7 @@ export class Scenario {
         `/invoices/${invoiceId}/finalize`,
         undefined,
         // Idempotent finalize: a retried call returns the same number.
-        idempotencyKey('finalize', invoiceId),
+        this.idem('finalize', invoiceId),
       );
       ctx.invoiceNumber = finalized.number ?? null;
       detail(`numéro attribué: ${finalized.number ?? '(async)'}`);
@@ -540,7 +532,7 @@ export class Scenario {
       await this.client.post(
         `/invoices/${invoiceId}/send`,
         undefined,
-        idempotencyKey('invoice.send', invoiceId),
+        this.idem('invoice.send', invoiceId),
       );
       detail('déposée à la PA');
     } catch (err) {
@@ -569,7 +561,7 @@ export class Scenario {
           success_url: `${this.config.publicBaseUrl || 'https://example.com'}/paid`,
           cancel_url: `${this.config.publicBaseUrl || 'https://example.com'}/cancel`,
         },
-        idempotencyKey('payment-link', invoiceId),
+        this.idem('payment-link', invoiceId),
       );
       detail(`payment link: ${link.url ?? '(créé)'}`);
     } catch (err) {
@@ -583,6 +575,12 @@ export class Scenario {
       this.softError('invoices.createPortalLink', err);
     }
 
+    // Signed payment token for an embedded/headless checkout (Pro+).
+    step(`invoices.createPaymentToken → POST /invoices/${invoiceId}/payment-token`);
+    await this.client
+      .post(`/invoices/${invoiceId}/payment-token`)
+      .catch((e) => this.softError('invoices.createPaymentToken', e));
+
     step(`payments.create → POST /invoices/${invoiceId}/payments`);
     try {
       await this.client.post(
@@ -593,7 +591,7 @@ export class Scenario {
           reference: 'VIR-2026-0001',
           paidAt: new Date().toISOString(),
         },
-        idempotencyKey('payment', invoiceId, 'VIR-2026-0001'),
+        this.idem('payment', invoiceId, 'VIR-2026-0001'),
       );
       detail('paiement partiel enregistré');
     } catch (err) {
@@ -614,7 +612,7 @@ export class Scenario {
       await this.client.post(
         `/invoices/${invoiceId}/remind`,
         { level: 1, message: 'Petit rappel amical concernant votre facture.' },
-        idempotencyKey('remind', invoiceId, '1'),
+        this.idem('remind', invoiceId, '1'),
       );
     } catch (err) {
       this.softError('invoices.remind', err);
@@ -651,7 +649,7 @@ export class Scenario {
       await this.client.post(
         `/invoices/${invoiceId}/audit-trail/pdf`,
         undefined,
-        idempotencyKey('audit-pdf', invoiceId),
+        this.idem('audit-pdf', invoiceId),
       );
     } catch (err) {
       this.softError('invoices.generateAuditTrailPdf', err);
@@ -687,9 +685,9 @@ export class Scenario {
           autoSend: false,
           // The template is a regular invoice payload minus the dates the
           // engine fills in per occurrence.
-          templateInvoice: this.sampleSubscriptionTemplate(customerId, ctx),
+          templateInvoice: this.sampleSubscriptionTemplate(ctx),
         },
-        idempotencyKey('recurring', customerId),
+        this.idem('recurring', customerId),
       );
       ctx.recurringId = recurring.id;
       detail(`abonnement=${recurring.id} status=${recurring.status}`);
@@ -758,7 +756,7 @@ export class Scenario {
           ],
           dates: { issued: this.today() },
         },
-        idempotencyKey('credit-note', ctx.invoiceId),
+        this.idem('credit-note', ctx.invoiceId),
       );
       ctx.creditNoteId = creditNote.id;
       detail(`avoir=${creditNote.id} status=${creditNote.status}`);
@@ -770,7 +768,7 @@ export class Scenario {
       const id = ctx.creditNoteId;
       step(`creditNotes.finalize → POST /credit-notes/${id}/finalize`);
       await this.client
-        .post(`/credit-notes/${id}/finalize`, undefined, idempotencyKey('cn.finalize', id))
+        .post(`/credit-notes/${id}/finalize`, undefined, this.idem('cn.finalize', id))
         .catch((e) => this.softError('creditNotes.finalize', e));
 
       step(`creditNotes.send → POST /credit-notes/${id}/send`);
@@ -809,18 +807,20 @@ export class Scenario {
 
     step('invoices.createIncoming → POST /invoices/incoming');
     try {
-      await this.client.post(
+      const incoming = await this.client.post<Identified>(
         '/invoices/incoming',
         {
           senderName: 'Fournitures Pro SAS',
-          senderSiret: '81234567800019',
+          senderSiret: '55208131766522',
           amount: 24000, // 240,00 € TTC en centimes
           reference: 'FP-2026-3310',
           notes: 'Consommables atelier',
         },
-        idempotencyKey('incoming', 'FP-2026-3310'),
+        this.idem('incoming', 'FP-2026-3310'),
       );
-      detail('facture entrante enregistrée');
+      // Drive the lifecycle (approve / record payment) on this fresh invoice.
+      if (incoming.id) ctx.receivedInvoiceId = incoming.id;
+      detail(`facture entrante enregistrée: ${incoming.id ?? '(sans id)'}`);
     } catch (err) {
       this.softError('invoices.createIncoming', err);
     }
@@ -836,8 +836,9 @@ export class Scenario {
     step('receivedInvoices.list → GET /received-invoices');
     try {
       const received = await this.client.list<Identified & { status?: string }>('/received-invoices');
+      // Prefer the invoice we just created above; fall back to the first listed.
       const firstReceived = received.data[0]?.id;
-      if (firstReceived) ctx.receivedInvoiceId = firstReceived;
+      if (!ctx.receivedInvoiceId && firstReceived) ctx.receivedInvoiceId = firstReceived;
       detail(`${received.data.length} facture(s) reçue(s)`);
     } catch (err) {
       this.softError('receivedInvoices.list', err);
@@ -872,7 +873,7 @@ export class Scenario {
         .post(
           `/received-invoices/${id}/record-payment`,
           { amount: 24000 },
-          idempotencyKey('recv.pay', id),
+          this.idem('recv.pay', id),
         )
         .catch((e) => this.softError('recordPayment', e));
     }
@@ -912,7 +913,7 @@ export class Scenario {
             ],
             description: 'Atelier Dupont — no-SDK demo server',
           },
-          idempotencyKey('webhook-endpoint', targetUrl),
+          this.idem('webhook-endpoint', targetUrl),
         );
         endpointId = created.id;
         // The signing secret (whsec_…) is shown ONCE, here. Put it in
@@ -988,7 +989,7 @@ export class Scenario {
       const fec = await this.client.post<Job>(
         '/exports/fec',
         { period_start: periodStart, period_end: periodEnd },
-        idempotencyKey('fec', periodStart, periodEnd),
+        this.idem('fec', periodStart, periodEnd),
       );
       detail(`FEC job=${fec.id} status=${fec.status}`);
       if (fec.id) {
@@ -999,29 +1000,21 @@ export class Scenario {
       this.softError('exports.generateFec', err);
     }
 
-    step('exports.exportInvoices → POST /exports/invoices');
-    await this.client
-      .post(
+    step('exports.exportInvoices → POST /exports/invoices (+ getExportStatus)');
+    try {
+      const job = await this.client.post<Job>(
         '/exports/invoices',
         { period_start: periodStart, period_end: periodEnd, statuses: ['paid', 'partially_paid'] },
-        idempotencyKey('export-invoices', periodStart),
-      )
-      .catch((e) => this.softError('exports.exportInvoices', e));
-
-    step('exports.exportRgpd → POST /exports/full (+ getExportStatus)');
-    try {
-      const full = await this.client.post<Job>(
-        '/exports/full',
-        undefined,
-        idempotencyKey('export-full', this.today()),
+        this.idem('export-invoices', periodStart),
       );
-      detail(`RGPD export job=${full.id} status=${full.status}`);
-      if (full.id) {
-        await this.client.get(`/exports/${full.id}`).catch((e) => this.softError('getExportStatus', e));
+      if (job.id) {
+        await this.client.get(`/exports/${job.id}`).catch((e) => this.softError('getExportStatus', e));
       }
     } catch (err) {
-      this.softError('exports.exportRgpd', err);
+      this.softError('exports.exportInvoices', err);
     }
+    // Account-level RGPD data portability (GDPR art. 20) is covered by
+    // account.requestExport / downloadExport in phase J.
 
     // I.24 — E-reporting (B2C / intra-EU declaration).
     step('ereporting.createDeclaration → POST /ereporting/declarations');
@@ -1030,11 +1023,11 @@ export class Scenario {
       const declaration = await this.client.post<Identified>(
         '/ereporting/declarations',
         {
-          type: 'b2c_france',
+          type: 'b2c',
           period,
           lines: [{ category: 'standard', amount: 100000, vatRate: 2000, vatAmount: 20000 }],
         },
-        idempotencyKey('ereporting', period),
+        this.idem('ereporting', period),
       );
       declarationId = declaration.id;
       detail(`déclaration=${declaration.id}`);
@@ -1075,136 +1068,13 @@ export class Scenario {
       step(`archives.get → GET /archives/${archiveInvoiceId}`);
       await this.client.get(`/archives/${archiveInvoiceId}`).catch((e) => this.softError('archives.get', e));
     }
-
-    // I.26 — Product notifications.
-    step('notifications.list → GET /notifications');
-    let notificationId: string | undefined;
-    try {
-      const notifications = await this.client.list<Identified>('/notifications', { limit: 10 });
-      notificationId = notifications.data[0]?.id;
-      detail(`${notifications.data.length} notification(s)`);
-    } catch (err) {
-      this.softError('notifications.list', err);
-    }
-    if (notificationId) {
-      step(`notifications.markRead → PATCH /notifications/${notificationId}`);
-      await this.client.patch(`/notifications/${notificationId}`, {}).catch((e) => this.softError('markRead', e));
-    }
-    step('notifications.markAllRead → PATCH /notifications/mark-all-read');
-    await this.client.patch('/notifications/mark-all-read', {}).catch((e) => this.softError('markAllRead', e));
-
-    step('notifications.retrievePreferences → GET /notification-preferences');
-    await this.client.get('/notification-preferences').catch((e) => this.softError('getPrefs', e));
-    step('notifications.updatePreferences → PATCH /notification-preferences');
-    // Body is a map keyed by event type; each value sets the per-channel
-    // preference. A bare {email,push,inApp} would be read as event keys, so
-    // the channels must live under an event key.
-    await this.client
-      .patch('/notification-preferences', {
-        invoice_paid: { email: true, push: false, inApp: true },
-      })
-      .catch((e) => this.softError('updatePrefs', e));
   }
 
   // ===========================================================================
   // J. Administration du compte
   // ===========================================================================
-  async phaseJ(ctx: ScenarioContext): Promise<void> {
+  async phaseJ(): Promise<void> {
     phase('J', 'Administration du compte');
-
-    // J.27 — API keys: create a restricted worker key, list, get, roll, revoke.
-    step('apiKeys.create → POST /api-keys (clé restreinte pour un worker)');
-    let workerKeyId: string | undefined;
-    try {
-      const key = await this.client.post<Identified & { secret?: string }>(
-        '/api-keys',
-        {
-          name: 'worker-readonly (demo)',
-          // Restricted scopes — Stripe-style. A worker that only reads invoices.
-          permissions: ['invoices:read', 'customers:read'],
-        },
-        randomUUID(), // new key each create — do NOT collapse two key creations
-      );
-      workerKeyId = key.id;
-      detail(`clé créée: ${key.id} secret=${key.secret ? key.secret.slice(0, 12) + '…' : '(shown once)'}`);
-    } catch (err) {
-      this.softError('apiKeys.create', err);
-    }
-
-    step('apiKeys.list → GET /api-keys');
-    await this.client.list('/api-keys').catch((e) => this.softError('apiKeys.list', e));
-
-    if (workerKeyId) {
-      const id = workerKeyId;
-      step(`apiKeys.get → GET /api-keys/${id}`);
-      await this.client.get(`/api-keys/${id}`).catch((e) => this.softError('apiKeys.get', e));
-
-      step(`apiKeys.roll → POST /api-keys/${id}/roll`);
-      await this.client.post(`/api-keys/${id}/roll`).catch((e) => this.softError('apiKeys.roll', e));
-
-      step(`apiKeys.revoke → DELETE /api-keys/${id}`);
-      if (ALLOW_DESTRUCTIVE) {
-        await this.client.delete(`/api-keys/${id}`).catch((e) => this.softError('apiKeys.revoke', e));
-        detail('clé worker révoquée');
-      } else {
-        warn('apiKeys.revoke codé mais ignoré (ALLOW_DESTRUCTIVE=1 pour révoquer la clé créée)');
-      }
-    }
-
-    // J.28 — Members: invite / list / get / updateRole / resend / revoke.
-    step(`members.invite → POST /companies/${ctx.companyId}/members`);
-    let memberId: string | undefined;
-    if (ALLOW_DESTRUCTIVE) {
-      try {
-        const member = await this.client.post<Identified>(
-          `/companies/${ctx.companyId}/members`,
-          { email: 'comptable@atelier-dupont.example', role: 'viewer', displayName: 'Comptable' },
-          idempotencyKey('member', 'comptable@atelier-dupont.example'),
-        );
-        memberId = member.id;
-        detail(`membre invité: ${member.id}`);
-      } catch (err) {
-        this.softError('members.invite', err);
-      }
-    } else {
-      warn('members.invite codé mais ignoré (envoie un e-mail réel — ALLOW_DESTRUCTIVE=1)');
-    }
-
-    step(`members.list → GET /companies/${ctx.companyId}/members`);
-    try {
-      const members = await this.client.list<Identified>(`/companies/${ctx.companyId}/members`);
-      memberId = memberId ?? members.data[0]?.id;
-      detail(`${members.data.length} membre(s)`);
-    } catch (err) {
-      this.softError('members.list', err);
-    }
-
-    if (memberId) {
-      const mid = memberId;
-      step(`members.get → GET /companies/${ctx.companyId}/members/${mid}`);
-      await this.client
-        .get(`/companies/${ctx.companyId}/members/${mid}`)
-        .catch((e) => this.softError('members.get', e));
-
-      if (ALLOW_DESTRUCTIVE) {
-        step(`members.updateRole → PATCH /companies/${ctx.companyId}/members/${mid}`);
-        await this.client
-          .patch(`/companies/${ctx.companyId}/members/${mid}`, { role: 'editor' })
-          .catch((e) => this.softError('members.updateRole', e));
-
-        step(`members.resendInvitation → POST /companies/${ctx.companyId}/members/${mid}/resend-invitation`);
-        await this.client
-          .post(`/companies/${ctx.companyId}/members/${mid}/resend-invitation`)
-          .catch((e) => this.softError('members.resend', e));
-
-        step(`members.revoke → DELETE /companies/${ctx.companyId}/members/${mid}`);
-        await this.client
-          .delete(`/companies/${ctx.companyId}/members/${mid}`)
-          .catch((e) => this.softError('members.revoke', e));
-      } else {
-        warn('members.updateRole/resend/revoke codés mais ignorés (ALLOW_DESTRUCTIVE=1)');
-      }
-    }
 
     // J.29 — Facturino's own billing (the subscription that powers this SaaS).
     step('billing.retrieveSubscription → GET /billing/subscription');
@@ -1226,43 +1096,13 @@ export class Scenario {
         .catch((e) => this.softError('billing.getInvoicePdf', e));
     }
 
-    // billing.updateSubscription / pause / resume / checkout / portal change the
-    // real Facturino subscription → guarded.
-    if (ALLOW_DESTRUCTIVE) {
-      step('billing.updateSubscription → PATCH /billing/subscription');
-      await this.client
-        .patch('/billing/subscription', { planId: 'pro', annual: false })
-        .catch((e) => this.softError('billing.updateSubscription', e));
-
-      step('billing.pause → POST /billing/pause');
-      await this.client.post('/billing/pause').catch((e) => this.softError('billing.pause', e));
-      step('billing.resume → POST /billing/resume');
-      await this.client.post('/billing/resume').catch((e) => this.softError('billing.resume', e));
-
-      step('billing.checkout → POST /billing/checkout');
-      await this.client
-        .post('/billing/checkout', {
-          planId: 'pro',
-          successUrl: 'https://example.com/ok',
-          cancelUrl: 'https://example.com/ko',
-        })
-        .catch((e) => this.softError('billing.checkout', e));
-
-      step('billing.portal → POST /billing/portal');
-      await this.client
-        .post('/billing/portal', { returnUrl: 'https://example.com/account' })
-        .catch((e) => this.softError('billing.portal', e));
-    } else {
-      warn('billing.updateSubscription/pause/resume/checkout/portal codés mais ignorés (modifient un abonnement réel — ALLOW_DESTRUCTIVE=1)');
-    }
-
-    // J.30 — RGPD: request data export, download it; deletion stays guarded.
+    // J.30 — RGPD: request a data export, then download it.
     step('account.requestExport → POST /account/export');
     try {
       const exportJob = await this.client.post<Job>(
         '/account/export',
         undefined,
-        idempotencyKey('account-export', this.today()),
+        this.idem('account-export', this.today()),
       );
       detail(`export job=${exportJob.id} status=${exportJob.status}`);
       if (exportJob.id) {
@@ -1274,37 +1114,6 @@ export class Scenario {
     } catch (err) {
       this.softError('account.requestExport', err);
     }
-
-    step('account.updateNotifications → PATCH /account/notifications');
-    // Strict schema: the per-event map must be wrapped under `preferences`.
-    await this.client
-      .patch('/account/notifications', {
-        preferences: { invoice_paid: { inApp: true, email: true, push: false } },
-      })
-      .catch((e) => this.softError('account.updateNotifications', e));
-
-    // account.scheduleDeletion / cancelDeletion — destructive: coded, guarded.
-    if (ALLOW_DESTRUCTIVE) {
-      step('account.scheduleDeletion → POST /account/schedule-deletion');
-      await this.client
-        .post('/account/schedule-deletion')
-        .catch((e) => this.softError('account.scheduleDeletion', e));
-      step('account.cancelDeletion → POST /account/cancel-deletion');
-      await this.client
-        .post('/account/cancel-deletion')
-        .catch((e) => this.softError('account.cancelDeletion', e));
-    } else {
-      warn('account.scheduleDeletion/cancelDeletion codés mais NON déclenchés (suppression de compte — ALLOW_DESTRUCTIVE=1)');
-    }
-
-    // Out of the main parcours — illustrative, plan-gated, guarded.
-    step('cabinets.list → GET /cabinets (illustratif, nécessite un plan cabinet_*)');
-    await this.client
-      .list<Identified>('/cabinets')
-      .then((p) => detail(`${p.data.length} cabinet(s)`))
-      .catch((e) => this.softError('cabinets.list (plan cabinet requis)', e));
-
-    warn('mfa.* : géré par l’app web Facturino, hors usage SaaS-API — non exécuté');
   }
 
   // ===========================================================================
@@ -1423,23 +1232,17 @@ export class Scenario {
         latePaymentRate: '3 fois le taux légal',
         collectionFee: '40 €',
       },
-      einvoicing: { format: 'facturx', profile: 'EN16931' },
       purchaseOrderNumber: 'PO-2026-0042', // BT-13
       notes: 'Merci pour votre confiance.',
     };
   }
 
   /** A subscription template invoice for the recurring engine (no dates). */
-  private sampleSubscriptionTemplate(customerId: string, ctx: ScenarioContext): unknown {
+  private sampleSubscriptionTemplate(ctx: ScenarioContext): unknown {
+    // templateInvoice carries the line items the recurring engine repeats each
+    // period; the customer, dates and numbering are resolved per occurrence.
     return {
-      type: 'standard',
-      customerId,
-      buyer: {
-        companyName: 'Café des Artisans SARL',
-        siret: '55208131766522',
-        address: { line1: '12 rue des Lilas', postalCode: '75011', city: 'Paris', country: 'FR' },
-      },
-      lines: [
+      items: [
         {
           description: 'Abonnement Atelier — mensuel',
           quantity: '1',
@@ -1450,13 +1253,9 @@ export class Scenario {
           ...(ctx.subscriptionProductId ? { product: ctx.subscriptionProductId } : {}),
         },
       ],
-      payment: {
-        terms: 'Prélèvement mensuel',
-        termsDays: 0,
-        method: 'sepa',
-        latePaymentRate: '3 fois le taux légal',
-        collectionFee: '40 €',
-      },
+      paymentMethod: 'sepa',
+      paymentTermsDays: 0,
+      notes: 'Abonnement mensuel — prélèvement SEPA.',
     };
   }
 

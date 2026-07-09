@@ -1,21 +1,38 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { ApiError } from '@facturino/node'
 
 /**
- * Build a deterministic `Idempotency-Key` for a given logical operation.
+ * Identifier for this execution of the demo. Mixed into every idempotency key
+ * so each run is a self-contained, repeatable scenario: re-running the demo
+ * creates a fresh dataset instead of colliding with a previous run, while a
+ * step retried *within* the same run still reuses its key.
+ */
+const RUN_ID = randomUUID()
+
+/**
+ * Build an `Idempotency-Key` for a logical operation in this run.
  *
  * The SDK forwards `options.idempotencyKey` as the `Idempotency-Key` header on
- * POSTs. We derive the key from a stable `scope` (e.g. "create-customer") plus
- * the identifying inputs, so a retried run reuses the SAME key and the API
- * returns the original resource instead of creating a duplicate. Regenerated
- * per step, stable across retries — exactly the scenario's contract.
+ * POST requests. Facturino guarantees that two POSTs sharing a key return the
+ * same resource, so if a step is retried after a network blip it never creates
+ * a duplicate. The key is derived from this run's id plus a stable `scope`
+ * (e.g. `"create-customer"`) and the identifying inputs.
  */
 export function idempotencyKey(scope: string, ...parts: string[]): string {
   const digest = createHash('sha256')
-    .update([scope, ...parts].join('|'))
+    .update([RUN_ID, scope, ...parts].join('|'))
     .digest('hex')
     .slice(0, 32)
   return `demo_${scope}_${digest}`
+}
+
+/**
+ * Format an integer-cents amount as a euro string. Facturino represents every
+ * monetary value as integer cents (e.g. `9900` → `99.00 €`), so the display
+ * layer divides by 100 — never do arithmetic on the formatted value.
+ */
+export function eur(cents: number): string {
+  return `${(cents / 100).toFixed(2)} €`
 }
 
 /** Minimal structured logger so the scenario reads like a transcript. */
@@ -73,6 +90,13 @@ export function isoDate(offsetDays = 0): string {
   const d = new Date()
   d.setUTCDate(d.getUTCDate() + offsetDays)
   return d.toISOString().slice(0, 10)
+}
+
+/** Full ISO 8601 timestamp (date + time), for fields that require a datetime. */
+export function isoDateTime(offsetDays = 0): string {
+  const d = new Date()
+  d.setUTCDate(d.getUTCDate() + offsetDays)
+  return d.toISOString()
 }
 
 /** Current month as `YYYY-MM` (used by e-reporting / reporting periods). */

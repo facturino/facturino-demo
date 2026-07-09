@@ -37,11 +37,6 @@ type Runner struct {
 	// fresh run starts clean state on the server.
 	seed string
 
-	// allowDestructive gates operations that would alter a real account or
-	// incur a real charge (Stripe checkout, account deletion, member
-	// revoke, billing plan change). Off by default; see SCENARIO.md.
-	allowDestructive bool
-
 	// WebhookURL is the public endpoint the scenario registers in phase H.
 	WebhookURL string
 
@@ -63,18 +58,16 @@ type State struct {
 	CreditNoteID          string `json:"credit_note_id,omitempty"`
 	ReceivedInvoiceID     string `json:"received_invoice_id,omitempty"`
 	WebhookEndpointID     string `json:"webhook_endpoint_id,omitempty"`
-	WorkerAPIKeyID        string `json:"worker_api_key_id,omitempty"`
 }
 
 // NewRunner builds a scenario runner. seed is mixed into idempotency keys;
 // pass a stable value (for example time.Now().Format) per logical run.
-func NewRunner(client *facturino.Client, log *Logger, seed string, allowDestructive bool, webhookURL string) *Runner {
+func NewRunner(client *facturino.Client, log *Logger, seed string, webhookURL string) *Runner {
 	return &Runner{
-		client:           client,
-		log:              log,
-		seed:             seed,
-		allowDestructive: allowDestructive,
-		WebhookURL:       webhookURL,
+		client:     client,
+		log:        log,
+		seed:       seed,
+		WebhookURL: webhookURL,
 	}
 }
 

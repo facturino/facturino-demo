@@ -68,7 +68,7 @@ curl http://localhost:4242/                           # route index
 
 Phase routes: `bootstrap`, `catalogue`, `customer`, `quote`, `validate`,
 `invoice`, `recurring`, `creditNote`, `purchases`, `webhooks`, `accounting`,
-`administration`, `illustrative`. Phases that depend on earlier resources
+`administration`. Phases that depend on earlier resources
 rebuild their (idempotent) prerequisites first, so any phase runs standalone.
 
 ### Webhooks
@@ -93,11 +93,10 @@ rebuild their (idempotent) prerequisites first, so any phase runs standalone.
   (`src/lib.ts → describeError`).
 - **Determinism** in test mode: PA status transitions are forced with
   `sandbox.simulateStatus` so the webhook chain fires without a real PA.
-- **Guarded side effects.** Account deletion, real Stripe checkout, plan
-  changes, member/key revocation and PA disconnect are coded but disabled
-  unless you set the matching env flag:
-  `ALLOW_ACCOUNT_DELETION=1`, `ALLOW_BILLING_MUTATIONS=1`,
-  `ALLOW_MEMBER_MUTATIONS=1`, `ALLOW_PA_DISCONNECT=1`.
+- **No destructive operations.** The demo never deletes the account, mutates
+  the Stripe subscription, or revokes keys/members — those surfaces are not part
+  of the developer API. It exercises the invoicing lifecycle end to end only,
+  using test-mode data.
 
 ## Files
 
@@ -114,13 +113,12 @@ rebuild their (idempotent) prerequisites first, so any phase runs standalone.
 | Step | What it does | SDK method(s) |
 |------|--------------|---------------|
 | **A.1** | Who am I (key, plan, livemode) | `account.retrieve` |
-| **A.2** | Issuing company + invoicing/accounting/reminder settings | `companies.list`, `companies.updateInvoicingSettings`, `settings.updateAccounting`, `settings.updateReminders`, `reference.listLegalForms`, `reference.listNafCodes` |
-| **A.3** | Connect PA (BYOPA) + health check | `companies.connectPA`, `companies.testPAConnection` |
+| **A.2** | Issuing company + INSEE reference data | `companies.list`, `companies.get`, `reference.listLegalForms`, `reference.listNafCodes` |
 | **A.4** | Quotas vs plan limits | `usage.retrieve` |
 | **B.5** | Products (subscription + service), CSV | `products.create`, `products.get`, `products.update`, `products.list` (filters `q`, `category`, `active`), `products.exportCsv` |
 | **B.6** | Customer (SIRENE lookup, lookup-or-create, `billing` contact) | `customers.lookup`, `customers.list`, `customers.create` (`contacts: [{ role: 'billing' }]`), `customers.get`, `customers.update` |
 | **C.7** | Quote → invoice | `quotes.create`, `quotes.send`, `quotes.get`, `quotes.accept`, `quotes.getPdf`, `quotes.getSignatureProof`, `quotes.clone`, `quotes.convert` |
-| **C.8** | Upstream EN16931 validation | `validate.run` (`siret`, `invoice`) |
+| **C.8** | Upstream EN16931 validation (invoice dry-run) | `validate.run` (invoice payload) |
 | **D.9** | Create + finalize + trace from quote | `invoices.create`, `invoices.finalize`, `invoices.get`, `invoices.getStatus`, `invoices.list` (filter `convertedFrom`) |
 | **D.10** | Documents (PDF, Factur-X, CII+UBL) | `invoices.getPdf`, `invoices.getFacturx`, `invoices.getXml`, `jobs.poll` |
 | **D.11** | Deposit to PA (+ deterministic status chain) | `invoices.send`, `sandbox.simulateStatus` |
@@ -135,14 +133,11 @@ rebuild their (idempotent) prerequisites first, so any phase runs standalone.
 | **H.20** | Receive + verify events | `webhooks.constructEvent` (in `src/webhook.ts`) |
 | **H.21** | Event log / replay | `events.list`, `events.get`, `events.retry` |
 | **I.22** | Reporting | `reporting.vatReport`, `reporting.revenueReport` |
-| **I.23** | Exports | `exports.generateFec`, `exports.getFecStatus`, `exports.exportInvoices`, `exports.exportRgpd`, `exports.getExportStatus` |
+| **I.23** | Exports | `exports.generateFec`, `exports.getFecStatus`, `exports.exportInvoices`, `exports.getExportStatus` |
 | **I.24** | E-reporting | `ereporting.createDeclaration`, `ereporting.get`, `ereporting.submitDeclaration`, `ereporting.list` |
 | **I.25** | Archives | `archives.list`, `archives.get` |
-| **I.26** | Product notifications | `notifications.list`, `notifications.markRead`, `notifications.markAllRead`, `notifications.retrievePreferences`, `notifications.updatePreferences` |
-| **J.27** | API keys (scoped worker key) | `apiKeys.create`, `apiKeys.get`, `apiKeys.list`, `apiKeys.roll`*, `apiKeys.revoke`* |
-| **J.28** | Members | `members.list`, `members.invite`, `members.get`, `members.updateRole`, `members.resendInvitation`, `members.revoke`* |
-| **J.29** | Facturino billing | `billing.retrieveSubscription`, `billing.listInvoices`, `billing.getInvoicePdf`, `billing.checkout`*, `billing.updateSubscription`*, `billing.pause`*, `billing.resume`*, `billing.portal`* |
-| **J.30** | RGPD | `account.requestExport`, `account.downloadExport`, `account.updateNotifications`, `account.scheduleDeletion`*, `account.cancelDeletion`* |
-| **(illustrative)** | Cabinets / MFA | `cabinets.list` (needs `cabinet_*` plan); `mfa.*` documented, not executed |
+| **J.29** | Facturino billing (read-only) | `billing.retrieveSubscription`, `billing.listInvoices`, `billing.getInvoicePdf` |
+| **J.30** | RGPD | `account.requestExport`, `account.downloadExport` |
 
-\* Guarded behind an `ALLOW_*` env flag — coded but not run by default.
+> API keys, team members and subscription changes are managed in the Facturino
+> web app, not over the developer API, so they are not part of the SDK.

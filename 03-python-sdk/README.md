@@ -94,14 +94,14 @@ window), then dispatches by event type. Register the endpoint from the scenario
 (phase H) or in the dashboard, and set `FACTURINO_WEBHOOK_SECRET` to the secret
 returned at creation time.
 
-### Safety: guarded operations
+### Scope
 
-Genuinely destructive or billing-mutating calls are **off by default**, behind
-the `RUN_DESTRUCTIVE` flag in `atelier_dupont/scenario.py`. They are fully coded
-so you can read exactly how they work, but are skipped at runtime so a demo run
-never charges a card, schedules an account deletion, rolls/revokes keys, or
-revokes a teammate. Flip the flag to exercise them against a throwaway test
-account.
+This demo exercises the invoicing lifecycle end to end (customers, products,
+invoices, quotes, credit notes, recurring, e-reporting, exports, billing read,
+RGPD export) against a **test-mode** key. It performs **no destructive
+operations**: account deletion, subscription changes and key/member management
+are managed in the Facturino web app, not the developer API — so a demo run
+never charges a card or mutates your account.
 
 ---
 
@@ -148,8 +148,7 @@ account.
 | ---- | --------------- | ------------- |
 | A1 | Who am I (key, plan, livemode) | `account.retrieve` |
 | A2 | Emitting company | `companies.list`, `companies.get`, `companies.create` |
-| A2 | Invoicing / accounting / reminder settings | `companies.update_invoicing_settings`, `settings.retrieve_accounting`/`update_accounting`, `settings.retrieve_reminders`/`update_reminders` |
-| A3 | PA connection (BYOPA) | `companies.connect_pa`, `companies.test_pa_connection` |
+| A2b | Terms (CGV) + onboarding milestone | `companies.upload_cgv` / `get_cgv` / `delete_cgv`, `companies.add_milestone` |
 | A3 | Reference tables | `reference.list_legal_forms`, `reference.list_naf_codes` |
 | A4 | Quota usage | `usage.retrieve` |
 | B5 | Products (subscription + service) | `products.create`, `products.list` (incl. filters `q` / `category` / `active`), `products.get`, `products.update`, `products.import_csv`, `products.export_csv` |
@@ -159,7 +158,7 @@ account.
 | D9 | Create / finalize invoice | `invoices.create`, `invoices.get`, `invoices.finalize`, `invoices.get_status`, `invoices.list` (filter `convertedFrom`) |
 | D10 | Documents (PDF / Factur-X / XML) | `invoices.get_pdf`, `invoices.get_facturx`, `invoices.get_xml`, `jobs.get` (poll) |
 | D11 | PA deposit | `invoices.send` |
-| D12 | Collection | `invoices.create_payment_link`, `invoices.create_portal_link`, `payments.create`, `payments.list` |
+| D12 | Collection | `invoices.create_payment_link`, `invoices.create_portal_link`, `invoices.create_payment_token`, `payments.create`, `payments.list` |
 | D13 | Reminder & events | `invoices.remind`, `invoices.list_events` |
 | D14 | Audit trail | `invoices.verify`, `invoices.get_audit_trail`, `invoices.generate_audit_trail_pdf` |
 | D15 | Clone | `invoices.clone` |
@@ -170,26 +169,20 @@ account.
 | H20 | Test + reception | `webhook_endpoints.test`, `Webhook.construct_event` (in `/webhooks`) |
 | H21 | Event replay | `events.list`, `events.get`, `events.retry` |
 | I22 | Reporting | `reporting.vat`, `reporting.revenue` |
-| I23 | Exports | `exports.generate_fec`, `exports.get_fec_status`, `exports.export_invoices`, `exports.export_rgpd`, `exports.get_status` |
+| I23 | Exports | `exports.generate_fec`, `exports.get_fec_status`, `exports.export_invoices` |
 | I24 | E-reporting | `ereporting.create_declaration`, `ereporting.list`, `ereporting.get`, `ereporting.submit_declaration` |
 | I25 | Archives | `archives.list`, `archives.get` |
-| I26 | Product notifications | `notifications.list`, `notifications.mark_read`, `notifications.mark_all_read`, `notifications.retrieve_preferences`, `notifications.update_preferences` |
-| J27 | API keys | `api_keys.create`, `api_keys.list`, `api_keys.get`, `api_keys.roll`*, `api_keys.revoke`* |
-| J28 | Members | `members.list`, `members.invite`*, `members.get`*, `members.update_role`*, `members.resend_invitation`*, `members.revoke`* |
-| J29 | Facturino billing | `billing.retrieve_subscription`, `billing.list_invoices`, `billing.get_invoice_pdf`, `billing.update_subscription`*, `billing.checkout`*, `billing.portal`*, `billing.pause`*, `billing.resume`* |
-| J30 | RGPD | `account.request_export`, `account.download_export`, `account.update_notifications`, `account.schedule_deletion`*, `account.cancel_deletion`* |
+| J29 | Facturino billing (read-only) | `billing.retrieve_subscription`, `billing.list_invoices`, `billing.get_invoice_pdf` |
+| J30 | RGPD | `account.request_export`, `account.download_export` |
 | — | Determinism (test mode) | `sandbox.simulate_status` |
-| — | Illustrative surfaces | `cabinets.list` (needs a `cabinet_*` plan); `mfa.*` documented only |
 
-\* Guarded by `RUN_DESTRUCTIVE` (or only reached after a non-destructive
-branch). Coded, skipped by default — see "Safety: guarded operations".
+> API keys, team members and subscription changes are managed in the Facturino
+> web app, not over the developer API, so they are not part of the SDK.
 
 ### API families covered
 
-`account` · `apiKeys` · `archives` · `billing` · `cabinets` · `companies` ·
-`creditNotes` · `customers` · `ereporting` · `events` · `exports` · `invoices` ·
-`jobs` · `members` · `notifications` · `payments` · `products` · `quotes` ·
-`receivedInvoices` · `recurringInvoices` · `reference` · `reporting` ·
-`sandbox` · `settings` · `usage` · `validate` · `webhookEndpoints` ·
-`webhooks` (reception). `mfa` is documented but driven from the web app rather
-than a server worker.
+`account` · `archives` · `billing` · `companies` · `creditNotes` ·
+`customers` · `ereporting` · `events` · `exports` · `invoices` · `jobs` ·
+`payments` · `products` · `quotes` · `receivedInvoices` ·
+`recurringInvoices` · `reference` · `reporting` · `sandbox` · `usage` ·
+`validate` · `webhookEndpoints` · `webhooks` (reception).

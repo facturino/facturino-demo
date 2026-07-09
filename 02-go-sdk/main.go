@@ -28,9 +28,8 @@ import (
 
 func main() {
 	var (
-		runOnce          = flag.Bool("run", false, "run the full scenario once, then exit (no server)")
-		allowDestructive = flag.Bool("allow-destructive", false, "enable charge-incurring / account-altering calls (Stripe checkout, plan change, member revoke)")
-		envFile          = flag.String("env", "", "optional path to a .env file to load before reading config")
+		runOnce = flag.Bool("run", false, "run the full scenario once, then exit (no server)")
+		envFile = flag.String("env", "", "optional path to a .env file to load before reading config")
 	)
 	flag.Parse()
 
@@ -51,7 +50,7 @@ func main() {
 	// A per-process seed keeps idempotency keys stable across retries within
 	// this run while differing from previous runs.
 	seed := time.Now().UTC().Format("20060102-150405")
-	runner := scenario.NewRunner(client, logger, seed, *allowDestructive, cfg.WebhookURL())
+	runner := scenario.NewRunner(client, logger, seed, cfg.WebhookURL())
 
 	if *runOnce {
 		ctx, cancel := signalContext()

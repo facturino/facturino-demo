@@ -17,10 +17,6 @@ declare(strict_types=1);
  *
  * Idempotency-Key : transmise via un X-Run-Id optionnel (en-tete ou query)
  * pour fixer le runId, sinon derive du jour courant (UTC).
- *
- * Operations destructrices : passez ?destructive=1 (ou X-Allow-Destructive: 1)
- * pour activer revoke / scheduleDeletion / updateSubscription. Desactive par
- * defaut afin de ne jamais abimer un vrai compte.
  */
 
 use AtelierDupont\Config;
@@ -90,15 +86,13 @@ function handleWebhook(Config $config): void
 }
 
 /**
- * Construit un Scenario en lisant les options de la requete (runId, garde
- * destructive).
+ * Construit un Scenario en lisant les options de la requete (runId).
  */
 function newScenario(Config $config): Scenario
 {
     $runId = requestOption('X-Run-Id', 'run_id');
-    $destructive = isTruthy(requestOption('X-Allow-Destructive', 'destructive'));
 
-    return new Scenario($config, $runId, $destructive);
+    return new Scenario($config, $runId);
 }
 
 /**
@@ -159,8 +153,7 @@ function runPhase(Scenario $scenario, string $phase): void
 function runCli(Config $config, array $argv): void
 {
     $phase = $argv[1] ?? 'all';
-    $destructive = isTruthy(getenv('ALLOW_DESTRUCTIVE') ?: '');
-    $scenario = new Scenario($config, getenv('RUN_ID') ?: null, $destructive);
+    $scenario = new Scenario($config, getenv('RUN_ID') ?: null);
 
     if ($phase === 'all') {
         $scenario->runAll();
@@ -190,7 +183,6 @@ function indexPayload(): array
         ],
         'options' => [
             'X-Run-Id | ?run_id' => 'fixe la cle d\'idempotence du run',
-            'X-Allow-Destructive | ?destructive=1' => 'active revoke/scheduleDeletion/updateSubscription',
         ],
         'amounts' => 'centimes (10000 = 100,00 EUR) ; TVA en centiemes de % (2000 = 20,00 %)',
     ];

@@ -5,9 +5,7 @@ declare(strict_types=1);
 namespace AtelierDupont;
 
 use Facturino\Account;
-use Facturino\ApiKey;
 use Facturino\Billing;
-use Facturino\Cabinet;
 use Facturino\Company;
 use Facturino\CreditNote;
 use Facturino\Customer;
@@ -17,8 +15,6 @@ use Facturino\Exception\ApiException;
 use Facturino\Export;
 use Facturino\Invoice;
 use Facturino\Job;
-use Facturino\Member;
-use Facturino\Notification;
 use Facturino\Payment;
 use Facturino\Product;
 use Facturino\Quote;
@@ -27,7 +23,6 @@ use Facturino\RecurringInvoice;
 use Facturino\Reference;
 use Facturino\Reporting;
 use Facturino\Sandbox;
-use Facturino\Setting;
 use Facturino\Usage;
 use Facturino\Validate;
 use Facturino\WebhookEndpoint;
@@ -45,17 +40,12 @@ use Facturino\WebhookEndpoint;
  *  - Idempotency-Key stable par etape sur chaque POST de creation ;
  *  - pagination par curseur (Collection auto-paginee du SDK) ;
  *  - les erreurs d'API sont capturees et journalisees avec leur request_id.
- *
- * Les operations destructrices / sensibles (suppression de compte, checkout
- * Stripe reel, revocation de membre/cle) sont CODEES mais placees derriere un
- * garde explicite ($allowDestructive) afin de ne jamais abimer un vrai compte.
  */
 final class Scenario
 {
     private Console $log;
     private Idempotency $idem;
     private Config $config;
-    private bool $allowDestructive;
 
     /**
      * Etat partage entre phases (ids decouverts ou crees au fil du parcours).
@@ -64,12 +54,11 @@ final class Scenario
      */
     private array $state = [];
 
-    public function __construct(Config $config, ?string $runId = null, bool $allowDestructive = false)
+    public function __construct(Config $config, ?string $runId = null)
     {
         $this->config = $config;
         $this->log = new Console();
         $this->idem = new Idempotency($runId);
-        $this->allowDestructive = $allowDestructive;
     }
 
     public function log(): Console
@@ -105,7 +94,6 @@ final class Scenario
     {
         return [
             'run_id' => $this->idem->runId(),
-            'allow_destructive' => $this->allowDestructive,
             'steps' => $this->log->steps(),
         ];
     }
@@ -143,45 +131,17 @@ final class Scenario
             return ['companyId' => $company['id'], 'name' => $company['name'] ?? null];
         });
 
-        // A2b — Reglage de la facturation (regime TVA, format de numerotation).
-        $this->step('A2b', 'companies.updateInvoicingSettings — regime TVA & numerotation', function (): array {
-            $company = Company::updateInvoicingSettings($this->companyId(), [
-                'numberingFormat' => 'FAC-{YYYY}-{seq:5}',
-                'defaultPaymentTermsDays' => 30,
-                'vatRegime' => 'normal',
-            ]);
+        // A2b — Administration societe : CGV (conditions generales) + jalon d'onboarding.
+        $this->step('A2b', 'companies.uploadCgv / getCgv / deleteCgv + addMilestone', function (): array {
+            $id = $this->companyId();
+            // Les CGV sont envoyees en PDF encode en base64.
+            $cgv = base64_encode("%PDF-1.4\n% Conditions generales de vente (demo)\n");
+            Company::uploadCgv($id, $cgv);
+            Company::getCgv($id);
+            Company::deleteCgv($id);
+            Company::addMilestone($id, 'firstInvoice');
 
-            return ['companyId' => $company['id'] ?? $this->companyId()];
-        });
-
-        // A2c — Parametres comptables (mapping FEC) + relances automatiques.
-        $this->step('A2c', 'settings.retrieve/update Accounting + Reminders', function (): array {
-            Setting::retrieveAccounting($this->companyId());
-            $accounting = Setting::updateAccounting($this->companyId(), [
-                'salesAccount' => '707000',
-                'vatAccount' => '445710',
-            ]);
-
-            Setting::retrieveReminders($this->companyId());
-            Setting::updateReminders($this->companyId(), [
-                'enabled' => true,
-                'schedule' => [7, 15, 30], // J+7 / J+15 / J+30
-            ]);
-
-            return ['accountingUpdated' => isset($accounting)];
-        });
-
-        // A3 — Connexion PA (BYOPA) : le client fournit ses propres credentials.
-        // En mode test, on utilise le connecteur mock pour rendre la demo
-        // deterministe (les vrais credentials d'une PA ne sont pas requis).
-        $this->step('A3', 'companies.connectPA + testPAConnection (BYOPA)', function (): array {
-            Company::connectPA($this->companyId(), [
-                'provider' => 'mock',
-                'apiKey' => 'demo-pa-key',
-            ]);
-            $test = Company::testPAConnection($this->companyId());
-
-            return ['paConnected' => true, 'reachable' => $test['ok'] ?? ($test['status'] ?? null)];
+            return ['companyId' => $id, 'milestone' => 'firstInvoice'];
         });
 
         // A3b — Referentiels INSEE pour alimenter les formulaires.
@@ -217,9 +177,11 @@ final class Scenario
             $product = Product::create([
                 'name' => 'Abonnement Atelier Dupont — Studio',
                 'description' => 'Acces mensuel a l\'atelier partage',
+                'category' => 'subscription',
                 'unitPrice' => 9900,  // 99,00 EUR HT
                 'vatRate' => 2000,    // 20,00 %
-                'unit' => 'mois',
+                'vatCode' => 'S',     // taux normal (CII BT-151)
+                'unit' => 'month',
             ], $this->idem->key('B5-subscription'));
             $this->state['productSubscriptionId'] = $product['id'];
 
@@ -230,9 +192,11 @@ final class Scenario
             $product = Product::create([
                 'name' => 'Prestation conseil',
                 'description' => 'Accompagnement projet, facture a l\'heure',
+                'category' => 'service',
                 'unitPrice' => 12000, // 120,00 EUR HT
                 'vatRate' => 2000,
-                'unit' => 'heure',
+                'vatCode' => 'S',
+                'unit' => 'hour',
             ], $this->idem->key('B5-consulting'));
             $this->state['productConsultingId'] = $product['id'];
 
@@ -267,14 +231,12 @@ final class Scenario
 
         // B5d — Import / export CSV (jobs asynchrones).
         $this->step('B5d', 'products.importCsv / exportCsv', function (): array {
-            Product::importCsv([
-                'rows' => [
-                    ['name' => 'Forfait setup', 'unitPrice' => 30000, 'vatRate' => 2000, 'unit' => 'forfait'],
-                ],
-            ]);
-            $export = Product::exportCsv();
+            // Import : CSV texte (en-tete + une ligne par produit), traitement
+            // asynchrone (202 Accepted). Export : CSV brut (text/csv).
+            Product::importCsv("name,unitPrice,vatRate,unit,vatCode\nForfait setup,30000,2000,flat_rate,S\n");
+            $csv = Product::exportCsv();
 
-            return ['exportJob' => $export['id'] ?? ($export['jobId'] ?? null)];
+            return ['exportBytes' => strlen($csv)];
         });
 
         // B6 — Client : lookup SIRENE/VIES puis lookup-or-create idempotent.
@@ -326,19 +288,11 @@ final class Scenario
         });
 
         $this->step('B6d', 'customers.importCsv / exportCsv', function (): array {
-            Customer::importCsv([
-                'rows' => [
-                    [
-                        'name' => 'Cabinet Durand',
-                        'type' => 'company',
-                        'email' => 'contact@durand.test',
-                        'siret' => '40483304800010',
-                    ],
-                ],
-            ]);
-            $export = Customer::exportCsv();
+            // Import : CSV texte (asynchrone, 202). Export : CSV brut (text/csv).
+            Customer::importCsv("name,type,email,siret\nCabinet Durand,company,contact@durand.test,55208131766522\n");
+            $csv = Customer::exportCsv();
 
-            return ['exportJob' => $export['id'] ?? ($export['jobId'] ?? null)];
+            return ['exportBytes' => strlen($csv)];
         });
     }
 
@@ -351,13 +305,15 @@ final class Scenario
         // C7 — Devis : creation, envoi, acceptation, PDF, preuve, conversion.
         $this->step('C7', 'quotes.create — devis pour le client', function (): array {
             $quote = Quote::create([
-                'customer' => $this->customerId(),
-                'items' => [
+                'customerId' => $this->customerId(),
+                'lines' => [
                     [
                         'description' => 'Mise en place studio + 2h conseil',
-                        'quantity' => 1,
+                        'quantity' => '1',
+                        'unit' => 'unit',
                         'unitPrice' => 30000, // 300,00 EUR HT
                         'vatRate' => 2000,
+                        'vatCode' => 'S',
                     ],
                 ],
                 'dates' => [
@@ -414,14 +370,13 @@ final class Scenario
 
         // C8 — Validation amont EN16931 sans rien emettre.
         $this->step('C8', 'validate.run — controle EN16931 du payload', function (): array {
-            $validation = Validate::run([
-                'kind' => 'invoice',
-                'invoice' => $this->invoicePayload(),
-            ]);
+            // POST /v1/validate accepte le meme corps qu'invoices.create et
+            // renvoie {valid, warnings} sans rien persister (dry-run CIUS-FR).
+            $validation = Validate::run($this->invoicePayload());
 
             return [
                 'valid' => $validation['valid'] ?? ($validation['ok'] ?? null),
-                'issues' => count($validation['errors'] ?? ($validation['issues'] ?? [])),
+                'issues' => count($validation['warnings'] ?? ($validation['errors'] ?? ($validation['issues'] ?? []))),
             ];
         });
     }
@@ -528,6 +483,13 @@ final class Scenario
             return ['paymentLink' => $link, 'portalLink' => $portal];
         });
 
+        // D12c — Jeton de paiement signe pour un checkout embarque/headless (Pro+).
+        $this->step('D12c', 'invoices.createPaymentToken', function (): array {
+            $token = Invoice::createPaymentToken($this->invoiceId());
+
+            return ['expiresAt' => $token['expiresAt'] ?? ($token['expires_at'] ?? null)];
+        });
+
         $this->step('D12b', 'payments.create / payments.list', function (): array {
             $id = $this->invoiceId();
             Payment::create($id, [
@@ -589,16 +551,23 @@ final class Scenario
     {
         $this->step('E16', 'recurringInvoices.create — abonnement mensuel', function (): array {
             $recurring = RecurringInvoice::create([
-                'customer' => $this->customerId(),
+                'customerId' => $this->customerId(),
                 'frequency' => 'monthly',
                 'startDate' => gmdate('Y-m-d'),
-                'items' => [
-                    [
-                        'description' => 'Abonnement Atelier Dupont — Studio',
-                        'quantity' => 1,
-                        'unitPrice' => 9900, // 99,00 EUR HT
-                        'vatRate' => 2000,
+                'nextGenerationDate' => gmdate('Y-m-d', strtotime('+1 month')),
+                'templateInvoice' => [
+                    'items' => [
+                        [
+                            'description' => 'Abonnement Atelier Dupont — Studio',
+                            'quantity' => '1',
+                            'unit' => 'month',
+                            'unitPrice' => 9900, // 99,00 EUR HT
+                            'vatRate' => 2000,
+                            'vatCode' => 'S',
+                        ],
                     ],
+                    'paymentMethod' => 'transfer',
+                    'paymentTermsDays' => 30,
                 ],
             ], $this->idem->key('E16-recurring'));
             $this->state['recurringId'] = $recurring['id'];
@@ -609,7 +578,8 @@ final class Scenario
         $this->step('E16b', 'recurringInvoices.get / update / list', function (): array {
             $id = $this->state['recurringId'];
             RecurringInvoice::retrieve($id);
-            RecurringInvoice::update($id, ['dayOfMonth' => 1]);
+            // Activer l'automatisation : finalisation + envoi a chaque echeance.
+            RecurringInvoice::update($id, ['autoFinalize' => true, 'autoSend' => true]);
 
             $count = 0;
             foreach (RecurringInvoice::all(['limit' => 25]) as $_r) {
@@ -636,16 +606,23 @@ final class Scenario
     {
         $this->step('F17', 'creditNotes.create — avoir lie a la facture', function (): array {
             $credit = CreditNote::create([
-                'customer' => $this->customerId(),
-                'invoice' => $this->invoiceId(), // avoir rattache a la facture emise
+                'customerId' => $this->customerId(),
+                'relatedInvoiceId' => $this->invoiceId(), // BT-25 : avoir rattache a la facture emise
+                'creditNoteType' => 'partial',
+                'reasonCode' => 'other',
                 'reason' => 'Remise commerciale exceptionnelle',
                 'items' => [
                     [
                         'description' => 'Avoir partiel — prestation conseil',
-                        'quantity' => 1,
+                        'quantity' => '1',
+                        'unit' => 'hour',
                         'unitPrice' => 5000, // 50,00 EUR HT
                         'vatRate' => 2000,
+                        'vatCode' => 'S',
                     ],
+                ],
+                'dates' => [
+                    'issued' => gmdate('Y-m-d'),
                 ],
             ], $this->idem->key('F17-credit'));
             $this->state['creditNoteId'] = $credit['id'];
@@ -688,21 +665,14 @@ final class Scenario
     public function purchases(): void
     {
         $this->step('G18', 'invoices.createIncoming / listIncoming', function (): array {
+            // Saisie manuelle d'une facture fournisseur recue hors PA :
+            // emetteur + montant TTC + reference de la piece.
             $incoming = Invoice::createIncoming([
-                'supplier' => [
-                    'name' => 'Fournitures Pro SAS',
-                    'siret' => '49759781400025',
-                ],
-                'number' => 'F-EXT-2026-512',
-                'currency' => 'EUR',
-                'totalExclVat' => 20000, // 200,00 EUR HT
-                'totalVat' => 4000,      // 40,00 EUR TVA
-                'totalInclVat' => 24000, // 240,00 EUR TTC
-                'dates' => [
-                    'issued' => gmdate('Y-m-d'),
-                    'due' => gmdate('Y-m-d', strtotime('+30 days')),
-                ],
-            ], $this->idem->key('G18-incoming'));
+                'senderName' => 'Fournitures Pro SAS',
+                'senderSiret' => '55208131766522',
+                'amount' => 24000, // 240,00 EUR TTC
+                'reference' => 'F-EXT-2026-512',
+            ]);
             $this->state['incomingId'] = $incoming['id'] ?? null;
 
             $count = 0;
@@ -832,7 +802,7 @@ final class Scenario
             ];
         });
 
-        $this->step('I23', 'exports.generateFec / getFecStatus / exportInvoices / exportRgpd', function () use ($periodStart, $periodEnd): array {
+        $this->step('I23', 'exports.generateFec / getFecStatus / exportInvoices', function () use ($periodStart, $periodEnd): array {
             $fec = null;
             try {
                 $fecJob = Export::generateFec([
@@ -847,13 +817,12 @@ final class Scenario
                 $fec = 'skip: ' . $e->getMessage(); // fec_export = Pro+
             }
 
-            $invoicesExport = Export::exportInvoices();
-            $rgpd = Export::exportRgpd();
-            $rgpdId = $rgpd['id'] ?? ($rgpd['jobId'] ?? null);
-            if (is_string($rgpdId)) {
-                Export::getExportStatus($rgpdId);
-            }
+            $invoicesExport = Export::exportInvoices([
+                'period_start' => $periodStart,
+                'period_end' => $periodEnd,
+            ]);
 
+            // L'export RGPD du compte est couvert par account.requestExport (J30).
             return [
                 'fec' => $fec,
                 'invoicesExportJob' => $invoicesExport['id'] ?? ($invoicesExport['jobId'] ?? null),
@@ -863,10 +832,19 @@ final class Scenario
         $this->step('I24', 'ereporting.create / list / get / submit', function (): array {
             $declaration = null;
             try {
+                // E-reporting de transactions B2C : periode mensuelle (YYYY-MM)
+                // et lignes agregees par categorie de TVA.
                 $declaration = Ereporting::createDeclaration([
                     'type' => 'b2c',
-                    'periodStart' => gmdate('Y-m-01'),
-                    'periodEnd' => gmdate('Y-m-t'),
+                    'period' => gmdate('Y-m'),
+                    'lines' => [
+                        [
+                            'category' => 'Ventes au comptoir',
+                            'amount' => 150000,   // 1 500,00 EUR HT
+                            'vatRate' => 2000,    // 20,00 %
+                            'vatAmount' => 30000, // 300,00 EUR TVA
+                        ],
+                    ],
                 ], $this->idem->key('I24-declaration'));
                 $id = $declaration['id'] ?? null;
                 if (is_string($id)) {
@@ -900,21 +878,6 @@ final class Scenario
                 return ['archives' => 'skip: ' . $e->getMessage()]; // addon Archive
             }
         });
-
-        $this->step('I26', 'notifications.list / markRead / markAllRead / preferences', function (): array {
-            $notifications = Notification::all(['limit' => 5]);
-            $first = $notifications->getData()[0] ?? null;
-            if ($first !== null) {
-                Notification::markRead($first['id']);
-            }
-            Notification::markAllRead();
-            Notification::retrievePreferences();
-            Notification::updatePreferences([
-                'invoice.paid' => ['email' => true, 'inApp' => true],
-            ]);
-
-            return ['notificationsSeen' => count($notifications)];
-        });
     }
 
     // -----------------------------------------------------------------
@@ -923,65 +886,7 @@ final class Scenario
 
     public function administration(): void
     {
-        // J27 — Cles API : creer une cle a scope restreint pour un worker.
-        $this->step('J27', 'apiKeys.create / list / get / roll (+ revoke garde)', function (): array {
-            $key = ApiKey::create([
-                'name' => 'worker-readonly',
-                'permissions' => ['invoices:read', 'customers:read'],
-            ], $this->idem->key('J27-key'));
-            $keyId = $key['id'] ?? null;
-            $this->state['workerKeyId'] = $keyId;
-
-            if (is_string($keyId)) {
-                ApiKey::retrieve($keyId);
-                ApiKey::roll($keyId); // rotation du secret, meme id
-            }
-
-            $count = 0;
-            foreach (ApiKey::all(['limit' => 25]) as $_k) {
-                $count++;
-            }
-
-            // revoke est destructif (revocation immediate) : derriere garde.
-            if ($this->allowDestructive && is_string($keyId)) {
-                ApiKey::revoke($keyId);
-            }
-
-            return [
-                'keyId' => $keyId,
-                'keysSeen' => $count,
-                'revoked' => $this->allowDestructive,
-            ];
-        });
-
-        // J28 — Membres : inviter, lister, role ; revoke derriere garde.
-        $this->step('J28', 'members.invite / list / get / updateRole / resendInvitation (+ revoke garde)', function (): array {
-            $member = Member::invite($this->companyId(), [
-                'email' => 'comptable@atelier-dupont.test',
-                'role' => 'accountant',
-                'displayName' => 'Comptable externe',
-            ], $this->idem->key('J28-member'));
-            $memberId = $member['id'] ?? null;
-
-            if (is_string($memberId)) {
-                Member::retrieve($this->companyId(), $memberId);
-                Member::updateRole($this->companyId(), $memberId, ['role' => 'admin']);
-                Member::resendInvitation($this->companyId(), $memberId);
-            }
-
-            $count = 0;
-            foreach (Member::all($this->companyId(), ['limit' => 25]) as $_m) {
-                $count++;
-            }
-
-            if ($this->allowDestructive && is_string($memberId)) {
-                Member::revoke($this->companyId(), $memberId);
-            }
-
-            return ['memberId' => $memberId, 'membersSeen' => $count, 'revoked' => $this->allowDestructive];
-        });
-
-        // J29 — Facturation Facturino (abonnement de la plateforme).
+        // J29 — Facturation Facturino (abonnement de la plateforme), en lecture.
         $this->step('J29', 'billing.retrieveSubscription / listInvoices / getInvoicePdf', function (): array {
             $subscription = Billing::retrieveSubscription();
 
@@ -991,15 +896,6 @@ final class Scenario
                 Billing::getInvoicePdf($first['id']);
             }
 
-            // updateSubscription / checkout / portal / pause / resume sont des
-            // mutations de l'abonnement reel -> derriere garde explicite.
-            if ($this->allowDestructive) {
-                Billing::updateSubscription(['plan' => 'pro', 'cycle' => 'monthly']);
-                Billing::portal(['returnUrl' => $this->config->publicBaseUrl . '/billing']);
-                // Billing::checkout([...]) demarre un paiement reel : laisse en commentaire.
-                // Billing::pause(['months' => 1]); Billing::resume();
-            }
-
             return [
                 'plan' => $subscription['plan'] ?? null,
                 'status' => $subscription['status'] ?? null,
@@ -1007,8 +903,8 @@ final class Scenario
             ];
         });
 
-        // J30 — RGPD : export des donnees + preferences de notification compte.
-        $this->step('J30', 'account.requestExport / downloadExport / updateNotifications', function (): array {
+        // J30 — RGPD : export des donnees du compte.
+        $this->step('J30', 'account.requestExport / downloadExport', function (): array {
             $export = Account::requestExport();
             $exportId = $export['exportId'] ?? ($export['id'] ?? null);
 
@@ -1023,32 +919,7 @@ final class Scenario
                 }
             }
 
-            Account::updateNotifications([
-                'productUpdates' => false,
-                'billingAlerts' => true,
-            ]);
-
-            // scheduleDeletion / cancelDeletion planifieraient la suppression du
-            // compte (RGPD art. 17). On ne les declenche JAMAIS automatiquement :
-            // ils restent ici a titre documentaire, derriere garde.
-            if ($this->allowDestructive) {
-                Account::scheduleDeletion();
-                Account::cancelDeletion(); // annulation immediate dans la foulee
-            }
-
             return ['exportId' => $exportId, 'downloadReady' => $downloadUrl !== null];
-        });
-
-        // Cabinets : surface experts-comptables, hors coeur SaaS. Appel
-        // illustratif minimal (necessite un plan cabinet_*).
-        $this->step('J-cabinets', 'cabinets.list — illustratif (plan cabinet_* requis)', function (): array {
-            try {
-                $cabinets = Cabinet::all(['limit' => 1]);
-
-                return ['cabinetsSeen' => count($cabinets)];
-            } catch (ApiException $e) {
-                return ['cabinets' => 'skip: ' . $e->getMessage()];
-            }
         });
     }
 
@@ -1082,23 +953,13 @@ final class Scenario
     private function invoicePayload(): array
     {
         return [
-            'customer' => $this->customerId(),
+            'customerId' => $this->customerId(),
             'purchaseOrderNumber' => 'PO-2026-0042', // BT-13
-            'items' => [
-                [
-                    'description' => 'Prestation conseil (2h)',
-                    'quantity' => 2,
-                    'unitPrice' => 12000, // 120,00 EUR HT / heure
-                    'vatRate' => 2000,    // 20,00 %
-                ],
-                [
-                    'description' => 'Abonnement Studio — 1 mois',
-                    'quantity' => 1,
-                    'unitPrice' => 6000,  // 60,00 EUR HT
-                    'vatRate' => 2000,
-                ],
-            ],
-            'delivery' => [ // BG-7 adresse de livraison
+            // BG-7 acheteur : SIRET 14 chiffres requis pour le B2B (CIUS-FR BT-46).
+            'buyer' => [
+                'companyName' => 'Boulangerie Martin SARL',
+                'siret' => '73282932000074',
+                'vatNumber' => 'FR47732829320',
                 'address' => [
                     'line1' => '12 rue du Four',
                     'postalCode' => '69002',
@@ -1106,9 +967,30 @@ final class Scenario
                     'country' => 'FR',
                 ],
             ],
+            'lines' => [
+                [
+                    'description' => 'Prestation conseil (2h)',
+                    'quantity' => '2',
+                    'unit' => 'hour',
+                    'unitPrice' => 12000, // 120,00 EUR HT / heure
+                    'vatRate' => 2000,    // 20,00 %
+                    'vatCode' => 'S',
+                ],
+                [
+                    'description' => 'Abonnement Studio — 1 mois',
+                    'quantity' => '1',
+                    'unit' => 'month',
+                    'unitPrice' => 6000,  // 60,00 EUR HT
+                    'vatRate' => 2000,
+                    'vatCode' => 'S',
+                ],
+            ],
             'payment' => [
-                'method' => 'transfer',
+                'terms' => 'Paiement a 30 jours',
                 'termsDays' => 30,
+                'method' => 'transfer',
+                'latePaymentRate' => '10.00', // taux des penalites de retard (%)
+                'collectionFee' => '40.00',   // indemnite forfaitaire de recouvrement (EUR)
             ],
             'dates' => [
                 'issued' => gmdate('Y-m-d'),

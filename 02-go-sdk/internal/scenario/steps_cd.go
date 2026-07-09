@@ -22,12 +22,12 @@ func (r *Runner) StepQuoteToInvoice(ctx context.Context) error {
 	// C.7 — Quote with the setup service + one month of subscription.
 	r.log.Step("quotes.Create")
 	quote, err := r.client.Quotes.Create(&facturino.QuoteParams{
-		Customer:   r.state.CustomerID,
-		ValidUntil: inDays(30),
-		Notes:      "Devis de mise en place + premier mois d'abonnement.",
+		Customer:     r.state.CustomerID,
+		ValidityDays: 30,
+		Notes:        "Devis de mise en place + premier mois d'abonnement.",
 		Items: []*facturino.ItemParams{
-			{Description: "Prestation de mise en place", Quantity: "1", Unit: "forfait", UnitPrice: 75000, VATRate: 2000, VATCode: "S", Product: r.state.OneOffProductID},
-			{Description: "Abonnement Atelier Pro (mois 1)", Quantity: "1", Unit: "mois", UnitPrice: 4900, VATRate: 2000, VATCode: "S", Product: r.state.SubscriptionProductID},
+			{Description: "Prestation de mise en place", Quantity: "1", Unit: "flat_rate", UnitPrice: 75000, VATRate: 2000, VATCode: "S", Product: r.state.OneOffProductID},
+			{Description: "Abonnement Atelier Pro (mois 1)", Quantity: "1", Unit: "month", UnitPrice: 4900, VATRate: 2000, VATCode: "S", Product: r.state.SubscriptionProductID},
 		},
 		IdempotencyKey: r.idemKey("quote"),
 	})
@@ -75,17 +75,20 @@ func (r *Runner) StepQuoteToInvoice(ctx context.Context) error {
 	// C.8 — Dry validation of an invoice payload (EN16931 + CIUS-FR) with
 	// no write. This is the cheap pre-flight a SaaS runs before emitting.
 	r.runStep("validate.Run (invoice payload)", func() error {
-		res, err := r.client.Validate.Run(&facturino.ValidateParams{
-			Kind: "invoice",
-			Invoice: map[string]any{
-				"customerId": r.state.CustomerID,
-				"lines": []map[string]any{
-					{"description": "Abonnement Atelier Pro", "quantity": "1", "unitPrice": 4900, "vatRate": 2000, "vatCode": "S"},
-				},
+		res, err := r.client.Validate.Run(&facturino.InvoiceParams{
+			Customer: r.state.CustomerID,
+			Buyer: &facturino.BuyerParams{
+				CompanyName: "Beta Industries SAS",
+				Address:     &facturino.Address{Line1: "29 boulevard Haussmann", PostalCode: "75009", City: "Paris", Country: "FR"},
 			},
+			Items: []*facturino.ItemParams{
+				{Description: "Abonnement Atelier Pro", Quantity: "1", Unit: "month", UnitPrice: 4900, VATRate: 2000, VATCode: "S"},
+			},
+			Dates:   &facturino.InvoiceDatesParams{Issued: today(), Due: inDays(30)},
+			Payment: &facturino.PaymentTermsParams{Terms: "30 jours net", TermsDays: 30, Method: "transfer", LatePaymentRate: "10.00", CollectionFee: "40.00"},
 		})
 		if err == nil {
-			r.log.OK("valid=%t errors=%d warnings=%d", res.Valid, len(res.Errors), len(res.Warnings))
+			r.log.OK("valid=%t warnings=%d", res.Valid, len(res.Warnings))
 		}
 		return err
 	})
@@ -125,15 +128,15 @@ func (r *Runner) StepInvoiceLifecycle(ctx context.Context) error {
 			Customer: r.state.CustomerID,
 			Buyer: &facturino.BuyerParams{
 				CompanyName: "Menuiserie Lemoine SARL",
-				Siret:       "55203453400041",
-				VATNumber:   "FR40552034534",
+				Siret:       "55204944776279",
+				VATNumber:   "FR40552049447",
 				Address:     &facturino.Address{Line1: "12 rue des Artisans", PostalCode: "69007", City: "Lyon", Country: "FR"},
 				// BG-7 delivery address (CIUS-FR requirement).
 				DeliveryAddress: &facturino.Address{Line1: "Entrepot Est, 4 allee du Bois", PostalCode: "69800", City: "Saint-Priest", Country: "FR"},
 			},
 			Items: []*facturino.ItemParams{
-				{Description: "Prestation de mise en place", Quantity: "1", Unit: "forfait", UnitPrice: 75000, VATRate: 2000, VATCode: "S", Product: r.state.OneOffProductID},
-				{Description: "Abonnement Atelier Pro (mois 1)", Quantity: "1", Unit: "mois", UnitPrice: 4900, VATRate: 2000, VATCode: "S", Product: r.state.SubscriptionProductID},
+				{Description: "Prestation de mise en place", Quantity: "1", Unit: "flat_rate", UnitPrice: 75000, VATRate: 2000, VATCode: "S", Product: r.state.OneOffProductID},
+				{Description: "Abonnement Atelier Pro (mois 1)", Quantity: "1", Unit: "month", UnitPrice: 4900, VATRate: 2000, VATCode: "S", Product: r.state.SubscriptionProductID},
 			},
 			Dates:   &facturino.InvoiceDatesParams{Issued: today(), Due: inDays(30)},
 			Payment: &facturino.PaymentTermsParams{Terms: "30 jours net", TermsDays: 30, Method: "transfer", LatePaymentRate: "10.00", CollectionFee: "40.00"},
@@ -231,9 +234,10 @@ func (r *Runner) StepInvoiceLifecycle(ctx context.Context) error {
 		return err
 	})
 
-	// Determinism: drive PA transitions with the sandbox so the webhook
-	// chain (transmitted -> received) fires without waiting on a real PA.
-	r.driveSandboxStatuses(invID, "transmitted", "received")
+	// Determinism: drive the PA transitions with the sandbox so the webhook
+	// chain fires without waiting on a real PA. End on "approved" so the
+	// invoice is in a payable state for the settlement below.
+	r.driveSandboxStatuses(invID, "transmitted", "available", "received", "approved")
 
 	// D.12 — Payment: a link/portal for the buyer, then record the payment.
 	r.runStep("invoices.CreatePaymentLink", func() error {
@@ -253,6 +257,19 @@ func (r *Runner) StepInvoiceLifecycle(ctx context.Context) error {
 		}
 		return err
 	})
+	// Signed payment token for an embedded/headless checkout (Pro+).
+	r.runStep("invoices.CreatePaymentToken", func() error {
+		tok, err := r.client.Invoices.CreatePaymentToken(invID)
+		if err == nil {
+			r.log.OK("payment token issued (expires %s)", tok.ExpiresAt)
+		}
+		return err
+	})
+	// D.12 — Dunning before settlement: a reminder can only be sent while the
+	// invoice is still unpaid, so send it before recording the payment.
+	r.runStep("invoices.Remind (level 1)", func() error {
+		return r.client.Invoices.Remind(invID, &facturino.InvoiceRemindParams{Level: 1})
+	})
 	r.runStep("payments.Create (full settlement)", func() error {
 		pay, err := r.client.Payments.Create(invID, &facturino.PaymentParams{
 			Amount:         95880, // 750 + 49 = 799,00 HT -> 958,80 TTC (20% VAT)
@@ -262,7 +279,7 @@ func (r *Runner) StepInvoiceLifecycle(ctx context.Context) error {
 			IdempotencyKey: r.idemKey("payment"),
 		})
 		if err == nil {
-			r.log.OK("payment %s amount=%s", pay.ID, pay.Amount)
+			r.log.OK("payment %s amount=%.2f EUR", pay.ID, float64(pay.Amount)/100)
 		}
 		return err
 	})
@@ -277,11 +294,6 @@ func (r *Runner) StepInvoiceLifecycle(ctx context.Context) error {
 		}
 		r.log.OK("%d payments recorded", count)
 		return nil
-	})
-
-	// D.13 — Reminder + event timeline.
-	r.runStep("invoices.Remind (level 1)", func() error {
-		return r.client.Invoices.Remind(invID, &facturino.InvoiceRemindParams{Level: 1})
 	})
 	r.runStep("invoices.ListEvents", func() error {
 		list, err := r.client.Invoices.ListEvents(invID)
@@ -372,7 +384,7 @@ func (r *Runner) pollJob(ctx context.Context, label, jobID string) error {
 		}
 		switch job.Status {
 		case "completed", "succeeded", "done":
-			r.log.OK("%s job %s done: %s", label, jobID, job.DownloadURL)
+			r.log.OK("%s job %s done: %s", label, jobID, job.URL)
 			return nil
 		case "failed", "error":
 			return fmt.Errorf("%s job %s failed: %s", label, jobID, job.Error)

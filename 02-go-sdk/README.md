@@ -97,17 +97,13 @@ webhook phase registers `PUBLIC_BASE_URL + /webhooks` as the endpoint. Persist
 the signing secret it returns into `FACTURINO_WEBHOOK_SECRET` so deliveries
 verify.
 
-### Destructive operations
+### Real-world side effects
 
-Charge-incurring or account-altering calls are gated behind
-`-allow-destructive` (off by default): Stripe checkout/portal, billing plan
-change / pause / resume, and team-member role change / revoke.
-`account.scheduleDeletion` / `cancelDeletion` are coded but **never auto-run** —
-they are documented in `internal/scenario/steps_hij.go`.
-
-```bash
-go run . -run -allow-destructive   # only if you know what you are doing
-```
+`EReporting.SubmitDeclaration` transmits a declaration to the DGFiP and
+`ReceivedInvoices.Suspend`/`Refuse` send lifecycle events to the PA. Everything
+else is read-only or test-mode safe. Subscription changes and account deletion
+are managed in the Facturino web app, not over the API, so the demo never
+attempts them.
 
 ## Conventions
 
@@ -151,9 +147,8 @@ The scenario steps map to SDK calls as follows. Service names are the fields on
 | Scenario step | SDK method(s) | Route |
 |---|---|---|
 | **A.1** Who am I | `Account.Retrieve` | `POST /run/bootstrap` |
-| **A.2** Seller company | `Companies.List`, `Companies.Get`, `Companies.UpdateInvoicingSettings` | `POST /run/bootstrap` |
-| **A.2** Accounting / reminders | `Settings.RetrieveAccounting` / `UpdateAccounting` / `RetrieveReminders` / `UpdateReminders` | `POST /run/bootstrap` |
-| **A.3** PA connection (BYOPA) | `Companies.ConnectPA`, `Companies.TestPAConnection` | `POST /run/bootstrap` |
+| **A.2** Seller company | `Companies.List`, `Companies.Get` | `POST /run/bootstrap` |
+| **A.2b** Terms (CGV) + milestone | `Companies.UploadCGV` / `GetCGV` / `DeleteCGV`, `Companies.AddMilestone` | `POST /run/bootstrap` |
 | **A.3** Reference tables | `Reference.ListLegalForms`, `Reference.ListNafCodes` | `POST /run/bootstrap` |
 | **A.4** Quotas | `Usage.Retrieve` | `POST /run/bootstrap` |
 | **B.5** Products | `Products.Create` / `Get` / `Update` / `List` (incl. `ProductListParams{Q, Category, Active}` filters) / `ExportCSV` | `POST /run/catalogue` |
@@ -163,7 +158,7 @@ The scenario steps map to SDK calls as follows. Service names are the fields on
 | **D.9** Create / finalize | `Invoices.Create` / `Finalize` / `Get` / `GetStatus` / `List` (`InvoiceListParams{ConvertedFrom}`) | `POST /run/invoice` |
 | **D.10** Documents | `Invoices.GetPDF` / `GetFacturX` / `GetXML` (CII + UBL), `Jobs.Get` (poll) | `POST /run/invoice` |
 | **D.11** Deposit to PA | `Invoices.Send`, `Sandbox.SimulateStatus` (determinism) | `POST /run/invoice` |
-| **D.12** Payment | `Invoices.CreatePaymentLink` / `CreatePortalLink`, `Payments.Create` / `List` | `POST /run/invoice` |
+| **D.12** Payment | `Invoices.CreatePaymentLink` / `CreatePortalLink` / `CreatePaymentToken`, `Payments.Create` / `List` | `POST /run/invoice` |
 | **D.13** Reminder & events | `Invoices.Remind`, `Invoices.ListEvents` | `POST /run/invoice` |
 | **D.14** Audit trail | `Invoices.Verify`, `Invoices.GetAuditTrail`, `Invoices.GenerateAuditTrailPDF` | `POST /run/invoice` |
 | **D.15** Clone | `Invoices.Clone` | `POST /run/invoice` |
@@ -174,23 +169,13 @@ The scenario steps map to SDK calls as follows. Service names are the fields on
 | **H.20** Reception | `facturino.VerifyWebhookSignature` (in `internal/server`) | `POST /webhooks` |
 | **H.21** Event replay | `Events.List` / `Get` / `Retry` | `POST /run/webhooks` |
 | **I.22** Reporting | `Reporting.VAT`, `Reporting.Revenue` | `POST /run/accounting` |
-| **I.23** Exports | `Exports.GenerateFEC` / `GetFECStatus` / `ExportInvoices` / `ExportRGPD` / `GetExportStatus` | `POST /run/accounting` |
+| **I.23** Exports | `Exports.GenerateFEC` / `GetFECStatus` / `ExportInvoices` / `GetExportStatus` | `POST /run/accounting` |
 | **I.24** E-reporting | `EReporting.CreateDeclaration` / `List` / `Get` / `SubmitDeclaration` | `POST /run/accounting` |
 | **I.25** Archives | `Archives.List`, `Archives.Get` | `POST /run/accounting` |
-| **I.26** Notifications | `Notifications.List` / `MarkRead` / `MarkAllRead` / `RetrievePreferences` / `UpdatePreferences` | `POST /run/accounting` |
-| **J.27** API keys | `APIKeys.Create` / `List` / `Get` / `Roll` / `Revoke` | `POST /run/administration` |
-| **J.28** Members | `Members.Invite` / `List` / `Get` / `ResendInvitation` / `UpdateRole`¹ / `Revoke`¹ | `POST /run/administration` |
-| **J.29** Platform billing | `Billing.RetrieveSubscription` / `ListInvoices` / `GetInvoicePDF` / `UpdateSubscription`¹ / `Pause`¹ / `Resume`¹ / `Checkout`¹ / `Portal`¹ | `POST /run/administration` |
-| **J.30** RGPD | `Account.RequestExport` / `DownloadExport` / `UpdateNotifications` (+ `ScheduleDeletion`/`CancelDeletion` documented, never auto-run)¹ | `POST /run/administration` |
-| Cabinets (illustrative) | `Cabinets.List` (requires a `cabinet_*` plan) | `POST /run/administration` |
-| MFA (out of band) | `client.Mfa.*` — managed in the Facturino web app, not exercised here | — |
+| **J.29** Platform billing (read-only) | `Billing.RetrieveSubscription` / `ListInvoices` / `GetInvoicePDF` | `POST /run/administration` |
+| **J.30** RGPD | `Account.RequestExport` / `DownloadExport` | `POST /run/administration` |
 
-¹ Gated behind `-allow-destructive`; otherwise the call shape is documented and
-the step logs a skip.
-
-> Notes on a few SDK names that differ from the generic surface: `Companies`
-> field is `client.Companies` (PA connection lives there as `ConnectPA` /
-> `TestPAConnection`); the MFA service is `client.Mfa`; reporting methods are
-> `Reporting.VAT` / `Reporting.Revenue`; document XML is `Invoices.GetXML(id,
-> "ubl")`.
-```
+> Notes on a few SDK names that differ from the generic surface: reporting
+> methods are `Reporting.VAT` / `Reporting.Revenue`; document XML is
+> `Invoices.GetXML(id, "ubl")`. API keys, team members and subscription changes
+> are managed in the Facturino web app, so they are not part of the Go SDK.

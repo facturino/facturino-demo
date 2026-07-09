@@ -22,13 +22,14 @@ les webhooks Facturino. Aucune UI lourde — la valeur est dans l'usage de l'API
 
 ### A. Bootstrap du compte SaaS
 1. **Qui suis-je** — `account.retrieve` : vérifier la clé, le plan, le livemode.
-2. **Société émettrice** — `companies.list` / `companies.get` ; régler la
-   facturation `companies.updateInvoicingSettings` (régime TVA, numérotation) ;
-   paramètres `settings.retrieveAccounting/updateAccounting`,
-   `settings.retrieveReminders/updateReminders`.
-3. **Connexion PA (BYOPA)** — `companies.connectPA` puis
-   `companies.testPAConnection` (déposera les factures). Référentiels :
-   `reference.listLegalForms`, `reference.listNafCodes`.
+2. **Société émettrice** — `companies.list` / `companies.get`.
+2b. **CGV & onboarding** — `companies.uploadCgv` / `getCgv` / `deleteCgv`
+   (conditions générales de vente, PDF encodé en base64) puis
+   `companies.addMilestone` (jalon d'onboarding, ex. `firstInvoice`).
+3. **Référentiels** — `reference.listLegalForms`, `reference.listNafCodes`.
+   (La connexion PA / BYOPA se configure dans l'app web Facturino, pas via
+   l'API ; la démo suppose une PA déjà connectée, ou force les transitions de
+   statut PA en mode test avec `sandbox.simulateStatus`.)
 4. **Quotas** — `usage.retrieve` : afficher consommation vs limites du plan.
 
 ### B. Catalogue & client
@@ -57,7 +58,8 @@ les webhooks Facturino. Aucune UI lourde — la valeur est dans l'usage de l'API
     (CII + UBL), via `jobs.poll` quand la génération est asynchrone.
 11. **Dépôt PA** — `invoices.send` (dépôt à la plateforme).
 12. **Encaissement** — `invoices.createPaymentLink` (Stripe),
-    `invoices.createPortalLink`, puis `payments.create` + `payments.list`.
+    `invoices.createPortalLink`, `invoices.createPaymentToken` (jeton de
+    paiement signé), puis `payments.create` + `payments.list`.
 13. **Relance & retard** — `invoices.remind` ; `invoices.listEvents`.
 14. **Piste d'audit** — `invoices.verify` (chaîne de hash),
     `invoices.getAuditTrail`, `invoices.generateAuditTrailPdf`.
@@ -93,33 +95,24 @@ les webhooks Facturino. Aucune UI lourde — la valeur est dans l'usage de l'API
 ### I. Comptabilité & pilotage
 22. **Reporting** — `reporting.vatReport`, `reporting.revenueReport`.
 23. **Exports** — `exports.generateFec` + `exports.getFecStatus` (FEC),
-    `exports.exportInvoices`, `exports.exportRgpd` + `exports.getExportStatus`.
+    `exports.exportInvoices` + `exports.getExportStatus` (ZIP Factur-X).
+    Le portage RGPD au niveau du compte est couvert en J via
+    `account.requestExport` / `account.downloadExport`.
 24. **E-reporting** — `ereporting.createDeclaration`, `ereporting.list`,
     `ereporting.get`, `ereporting.submitDeclaration`.
 25. **Archives** — `archives.list`, `archives.get`.
-26. **Notifications produit** — `notifications.list`, `notifications.markRead`,
-    `notifications.markAllRead`, `notifications.retrievePreferences`,
-    `notifications.updatePreferences`.
+### J. Compte & facturation (API développeur — lecture seule)
+26. **Facturation Facturino** — `billing.retrieveSubscription`,
+    `billing.listInvoices`, `billing.getInvoicePdf`. L'API billing est en
+    **lecture seule** : le changement de plan, l'annulation et le portail de
+    paiement se gèrent dans l'app web Facturino, pas via l'API.
+27. **RGPD (portabilité)** — `account.requestExport` + `account.downloadExport`.
 
-### J. Administration du compte
-27. **Clés API** — `apiKeys.create` / `list` / `get` / `roll` / `revoke`
-    (créer une clé scoping restreint pour un worker).
-28. **Membres** — `members.invite` / `list` / `get` / `updateRole` /
-    `resendInvitation` / `revoke`.
-29. **Facturation Facturino** — `billing.retrieveSubscription`,
-    `billing.listInvoices`, `billing.getInvoicePdf`,
-    `billing.updateSubscription` (changement de plan), `billing.pause` /
-    `resume`, `billing.checkout` / `portal`.
-30. **RGPD** — `account.requestExport` + `account.downloadExport`,
-    `account.updateNotifications` (et `scheduleDeletion`/`cancelDeletion` en
-    commentaire, non déclenchés pour ne pas planifier une suppression réelle).
-
-### Hors parcours principal (mentionnés, déclenchés avec parcimonie)
-- **MFA** (`mfa.*`) : géré par l'app web Facturino, pas un usage SaaS-API
-  typique. Documenté mais non exécuté.
-- **Cabinets** (`cabinets.*`) : surface experts-comptables (multi-sociétés).
-  Une démo dédiée la montrerait ; ici un appel `cabinets.list` illustratif,
-  encadré d'un commentaire (nécessite un plan cabinet_*).
+### Hors périmètre de l'API développeur (gérés dans l'app web Facturino)
+- La **connexion PA (BYOPA)**, le **changement de plan/abonnement**, les **clés
+  API**, les **membres/équipe**, les **notifications produit**, la **MFA** et les
+  **cabinets** sont des surfaces d'interface (compte, sécurité, équipe) — hors
+  API développeur, donc non exercées par cette démo.
 - **Sandbox** (`sandbox.simulateStatus`) : en mode `fac_test_`, sert à forcer
   une transition de statut PA pour démontrer la chaîne de webhooks sans
   attendre la vraie PA. Utilisé pour rendre la démo déterministe.
@@ -149,13 +142,10 @@ les webhooks Facturino. Aucune UI lourde — la valeur est dans l'usage de l'API
 
 Le parcours ci-dessus touche chaque famille au moins une fois :
 
-account · apiKeys · archives · billing · cabinets¹ · companies · creditNotes ·
-customers · ereporting · events · exports · invoices · jobs · members · mfa¹ ·
-notifications · payments · products · quotes · receivedInvoices ·
-recurringInvoices · reference · reporting · sandbox · settings · usage ·
-validate · webhookEndpoints · webhooks(réception)
-
-¹ documenté + appel illustratif minimal, non au cœur d'un SaaS standard.
+account · archives · billing · companies · creditNotes · customers ·
+ereporting · events · exports · invoices · jobs · payments · products ·
+quotes · receivedInvoices · recurringInvoices · reference · reporting ·
+sandbox · usage · validate · webhookEndpoints · webhooks(réception)
 
 Chaque démo inclut, à la fin de son README, une **table de correspondance
 étape → méthode SDK (ou requête HTTP pour la démo sans SDK)**.

@@ -19,12 +19,13 @@ func (r *Runner) StepRecurring(ctx context.Context) error {
 
 	r.log.Step("recurringInvoices.Create (monthly)")
 	rec, err := r.client.RecurringInvoices.Create(&facturino.RecurringInvoiceParams{
-		CustomerID: r.state.CustomerID,
-		Frequency:  "monthly",
-		StartDate:  firstOfNextMonth(),
+		CustomerID:         r.state.CustomerID,
+		Frequency:          "monthly",
+		StartDate:          firstOfNextMonth(),
+		NextGenerationDate: firstOfNextMonth(),
 		TemplateInvoice: &facturino.RecurringTemplateParams{
-			Lines: []*facturino.ItemParams{
-				{Description: "Abonnement Atelier Pro (mensuel)", Quantity: "1", Unit: "mois", UnitPrice: 4900, VATRate: 2000, VATCode: "S", Product: r.state.SubscriptionProductID},
+			Items: []*facturino.ItemParams{
+				{Description: "Abonnement Atelier Pro (mensuel)", Quantity: "1", Unit: "month", UnitPrice: 4900, VATRate: 2000, VATCode: "S", Product: r.state.SubscriptionProductID},
 			},
 			PaymentMethod:    "transfer",
 			PaymentTermsDays: 30,
@@ -89,11 +90,11 @@ func (r *Runner) StepCreditNote(ctx context.Context) error {
 	cn, err := r.client.CreditNotes.Create(&facturino.CreditNoteParams{
 		Customer:         r.state.CustomerID,
 		RelatedInvoiceID: r.state.InvoiceID,
-		CreditNoteType:   "commercial_gesture",
-		ReasonCode:       "discount",
+		CreditNoteType:   "partial",
+		ReasonCode:       "other",
 		Reason:           "Geste commercial sur la prestation de mise en place.",
 		Items: []*facturino.ItemParams{
-			{Description: "Remise exceptionnelle", Quantity: "1", Unit: "forfait", UnitPrice: 5000, VATRate: 2000, VATCode: "S"},
+			{Description: "Remise exceptionnelle", Quantity: "1", Unit: "flat_rate", UnitPrice: 5000, VATRate: 2000, VATCode: "S"},
 		},
 		Dates:          &facturino.CreditNoteDates{Issued: today()},
 		IdempotencyKey: r.idemKey("credit-note"),
@@ -147,7 +148,7 @@ func (r *Runner) StepCreditNote(ctx context.Context) error {
 			r.log.OK("no expanded payload returned")
 			return nil
 		}
-		r.log.OK("%d linked credit notes, net_balance=%s", len(inv.Expanded.CreditNotes), inv.Expanded.NetBalance)
+		r.log.OK("%d linked credit notes, net_balance=%.2f", len(inv.Expanded.CreditNotes), float64(inv.Expanded.NetBalance)/100)
 		return nil
 	})
 
@@ -166,16 +167,11 @@ func (r *Runner) StepReceivedInvoices(ctx context.Context) error {
 	// G.18 — Ingest an incoming (supplier) invoice. In production these
 	// arrive from the PA; here we seed one so the inbox is non-empty.
 	r.runStep("invoices.CreateIncoming (supplier invoice)", func() error {
-		inv, err := r.client.Invoices.CreateIncoming(&facturino.InvoiceParams{
-			Customer: r.state.CustomerID,
-			Buyer: &facturino.BuyerParams{
-				CompanyName: "Atelier Dupont SAS",
-				Address:     &facturino.Address{Line1: "1 place du Marche", PostalCode: "75011", City: "Paris", Country: "FR"},
-			},
-			Items: []*facturino.ItemParams{
-				{Description: "Fournitures de bureau", Quantity: "1", Unit: "lot", UnitPrice: 12000, VATRate: 2000, VATCode: "S"},
-			},
-			Dates:          &facturino.InvoiceDatesParams{Issued: today(), Due: inDays(30)},
+		inv, err := r.client.Invoices.CreateIncoming(&facturino.IncomingInvoiceParams{
+			SenderName:     "Fournisseur Demo SARL",
+			SenderSiret:    "40483304800022",
+			Amount:         60000, // total incl. VAT, in integer cents
+			Reference:      "F-SUP-2026-118",
 			IdempotencyKey: r.idemKey("incoming"),
 		})
 		if err == nil {

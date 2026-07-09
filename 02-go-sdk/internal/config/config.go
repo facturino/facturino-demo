@@ -44,8 +44,12 @@ func (c *Config) IsTestMode() bool {
 	return strings.HasPrefix(c.APIKey, "fac_test_")
 }
 
-// WebhookURL returns the public URL Facturino should call.
+// WebhookURL returns the public URL Facturino should call, or "" when no public
+// base URL is configured — webhook registration is then skipped by the scenario.
 func (c *Config) WebhookURL() string {
+	if c.PublicBaseURL == "" {
+		return ""
+	}
 	return strings.TrimRight(c.PublicBaseURL, "/") + "/webhooks"
 }
 
