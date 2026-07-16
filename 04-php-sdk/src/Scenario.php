@@ -1021,7 +1021,8 @@ final class Scenario
             $job = Job::retrieve($jobId);
             $status = $job['status'] ?? 'pending';
             if ($status === 'completed' || $status === 'succeeded') {
-                return $job['download_url'] ?? ($job['url'] ?? null);
+                // The job resource exposes the signed link as `url`.
+                return $job['url'] ?? null;
             }
             if ($status === 'failed') {
                 return null;
