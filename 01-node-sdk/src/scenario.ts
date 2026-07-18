@@ -970,7 +970,11 @@ export class Scenario {
     }
   }
 
-  /** Build an invoice/quote line for the hourly service product. */
+  /**
+   * Build an invoice/quote line for the hourly service product. Standard-rate
+   * VAT here; an exempt line could also set `vatexCode` (e.g. 'VATEX-FR-261' for
+   * Qualiopi training) to state the exemption basis (BT-121) explicitly.
+   */
   private serviceLine(product: Product, quantity: string): InvoiceLineItemParam {
     return {
       description: product.name,
