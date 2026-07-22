@@ -1,0 +1,11 @@
+// Local development helper — copy to `go.work` (gitignored) to build the demo
+// against the sibling Facturino Go SDK source tree instead of the published tag:
+//
+//   cp go.work.example go.work
+//   go build ./...
+//
+// Adjust the SDK path if your checkout layout differs.
+go 1.21
+
+use .
+use ../../sdks/go

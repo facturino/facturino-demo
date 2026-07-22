@@ -21,6 +21,9 @@ composer.lock
 # Go
 *.exe
 /02-go-sdk/bin/
+# Local dev override (points the demo at the sibling SDK source tree) — see go.work.example
+go.work
+go.work.sum
 
 # OS / editor
 .DS_Store
