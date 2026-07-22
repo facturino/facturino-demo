@@ -38,8 +38,8 @@ function handleEvent(event: WebhookEvent): void {
     case 'credit_note.finalized':
       log.ok(`[webhook] credit note ${object} finalized`)
       break
-    case 'received_invoice.available':
-      log.info(`[webhook] supplier invoice ${object} available in the inbox`)
+    case 'invoice.incoming.received':
+      log.info(`[webhook] supplier invoice ${object} received in the inbox`)
       break
     default:
       // Unknown / unsubscribed type: acknowledge but take no action.

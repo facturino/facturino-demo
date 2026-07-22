@@ -195,6 +195,3 @@ listed in `docs/SCENARIO.md`.
 | **I25** | Archives | `\Facturino\Resource\Archive::all/retrieve()` |
 | **J29** | Facturino billing (read-only) | `Billing::retrieveSubscription/listInvoices/getInvoicePdf()` |
 | **J30** | RGPD | `Account::requestExport/downloadExport()` |
-
-> **MFA** (`Mfa::*`) is part of the SDK but belongs to the web app flow, not a
-> typical SaaS-API integration, so it is documented but not exercised here.

@@ -65,6 +65,19 @@ les webhooks Facturino. Aucune UI lourde — la valeur est dans l'usage de l'API
     `invoices.getAuditTrail`, `invoices.generateAuditTrailPdf`.
 15. **Clone** — `invoices.clone` (récurrence manuelle ponctuelle).
 
+### D bis. Acomptes & échéanciers (facturation avancée — supporté par l'API)
+15b. **Facture d'acompte (386)** — `invoices.create({ type: 'deposit', … })` puis
+    `invoices.finalize` : facture d'acompte encaissée d'avance.
+15c. **Facture de solde avec déduction** —
+    `invoices.create({ …, deposits: [{ invoiceId: '<acompte>' }] })` : l'acompte est
+    déduit (BT-113 prépayé), le montant dû = TTC − acomptes (BR-CO-16).
+15d. **Échéancier (paiement en plusieurs fois)** —
+    `invoices.create({ …, schedule: [{ amount, dueDate, label }] })` : 2 à 12
+    versements (montants en centimes) sommant au restant dû, le dernier à la date
+    d'échéance (BT-9). Le montant est en centimes entiers, comme partout dans l'API.
+    > Les runners de référence exécutent le flux standard. Ces paramètres (`type`,
+    > `deposits`, `schedule`) sont **additifs** et documentés ici pour la vitrine.
+
 ### E. Abonnement récurrent (cœur SaaS)
 16. **Récurrence** — `recurringInvoices.create` (mensuel),
     `recurringInvoices.list`, `recurringInvoices.get`,

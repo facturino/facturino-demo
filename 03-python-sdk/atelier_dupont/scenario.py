@@ -700,10 +700,13 @@ def phase_j_admin(client: facturino.Client, log: list[dict[str, Any]], state: di
     if isinstance(bi, dict) and bi.get("id"):
         _optional(log, "J29 billing.get_invoice_pdf", lambda: client.billing.get_invoice_pdf(bi["id"]))
 
-    # J30 — RGPD: request + download a data export.
+    # J30 — RGPD: request a data export. It runs ASYNC — POST /account/export returns
+    # a 202 job (object:"job", id:…), so poll it to completion, then download the
+    # prepared archive via its short-lived signed URL.
     export = _optional(log, "J30 account.request_export", client.account.request_export)
-    export_id = export.get("exportId") if isinstance(export, dict) else None
+    export_id = extract_job_id(export) if isinstance(export, dict) else None
     if export_id:
+        _optional(log, "J30 export poll", lambda: poll_job(client, export_id, timeout=30.0))
         _optional(log, "J30 account.download_export", lambda: client.account.download_export(export_id))
 
 

@@ -73,7 +73,10 @@ export function loadConfig(): Config {
   return {
     apiKey,
     baseUrl,
-    webhookSecret: required('FACTURINO_WEBHOOK_SECRET'),
+    // Optional: the signing secret only exists AFTER webhookEndpoints.create runs
+    // (chicken-and-egg at first boot). Empty until then; the /webhook handler
+    // rejects unsigned/unknown-secret deliveries.
+    webhookSecret: optional('FACTURINO_WEBHOOK_SECRET', ''),
     publicBaseUrl: optional('PUBLIC_BASE_URL', '').replace(/\/+$/, ''),
     port: Number.parseInt(optional('PORT', '4242'), 10),
     livemode,

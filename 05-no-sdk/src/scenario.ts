@@ -189,10 +189,11 @@ export class Scenario {
 
     // A.4 — usage.retrieve: consumption vs plan limits.
     step('usage.retrieve → GET /usage');
-    const usage = await this.client.get<{ apiRequests?: { used?: number; limit?: number } }>(
+    const usage = await this.client.get<{ counters?: { apiRequestsMonth?: { used?: number; limit?: number | null } } }>(
       '/usage',
     );
-    detail(`API requests: ${usage.apiRequests?.used ?? '?'} / ${usage.apiRequests?.limit ?? '∞'}`);
+    const apiReq = usage.counters?.apiRequestsMonth;
+    detail(`API requests: ${apiReq?.used ?? '?'} / ${apiReq?.limit ?? '∞'}`);
   }
 
   // ===========================================================================
@@ -278,11 +279,11 @@ export class Scenario {
     // B.6 — Customer: SIRENE/VIES lookup, then lookup-or-create (replayable).
     step('customers.lookup → POST /customers/lookup (SIRENE)');
     try {
-      const lookup = await this.client.post<{ results?: Array<{ name?: string }> }>(
+      const lookup = await this.client.post<{ found?: boolean; data?: { name?: string } | null }>(
         '/customers/lookup',
         { siret: '55208131766522' },
       );
-      detail(`SIRENE: ${lookup.results?.[0]?.name ?? 'aucun résultat'}`);
+      detail(`SIRENE: ${lookup.found ? (lookup.data?.name ?? 'trouvé') : 'aucun résultat'}`);
     } catch (err) {
       this.softError('customers.lookup', err);
     }
@@ -631,8 +632,8 @@ export class Scenario {
     // D.14 — Audit trail (hash chain + PDF).
     step(`invoices.verify → GET /invoices/${invoiceId}/verify (hash chain)`);
     try {
-      const verify = await this.client.get<{ valid?: boolean }>(`/invoices/${invoiceId}/verify`);
-      detail(`chaîne de hash valide=${verify.valid ?? '?'}`);
+      const verify = await this.client.get<{ verified?: boolean }>(`/invoices/${invoiceId}/verify`);
+      detail(`chaîne de hash valide=${verify.verified ?? '?'}`);
     } catch (err) {
       this.softError('invoices.verify', err);
     }
@@ -872,7 +873,7 @@ export class Scenario {
       await this.client
         .post(
           `/received-invoices/${id}/record-payment`,
-          { amount: 24000 },
+          { amount: 24000, method: 'transfer', paidAt: new Date().toISOString().slice(0, 10) },
           this.idem('recv.pay', id),
         )
         .catch((e) => this.softError('recordPayment', e));
