@@ -17,14 +17,11 @@ steps, plus a `/webhooks` endpoint that verifies inbound event signatures.
 
 ## Install
 
-The SDK is referenced straight from its public Git repository (see
-`package.json`):
+The SDK comes from the npm registry (see `package.json`):
 
 ```jsonc
 "dependencies": {
-  "@facturino/node": "github:facturino/facturino-node"
-  // Once published to npm, use the registry version instead:  "^1.0.0"
-  // i.e.  npm install @facturino/node
+  "@facturino/node": "^1.0.0"
 }
 ```
 

@@ -30,13 +30,10 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` installs the SDK directly from its public source repo
-(a VCS dependency). Once the package is published to PyPI, swap that line for
-the registry form — both are shown in the file:
+`requirements.txt` installs the SDK from PyPI:
 
 ```text
-facturino @ git+https://github.com/facturino/facturino-python   # VCS (now)
-# facturino>=1.0                                                # registry (later)
+facturino>=1.0
 flask>=3.0
 ```
 
