@@ -714,12 +714,16 @@ export class Scenario {
       log.warn(`billing: ${describeError(err)}`)
     }
 
-    // J.30 — RGPD: request a data export, then fetch a short-lived download URL.
+    // J.30 — RGPD: request a data export, then poll the job — the download
+    // URL surfaces on `GET /v1/exports/:jobId` (`download_url`) once the
+    // worker has finished. The dedicated `/account/exports/:id/download`
+    // route serves the `export_ready` notification link (`rgpdexp_…` id),
+    // not the job id.
     try {
       const exportReq = await this.f.account.requestExport()
-      log.ok(`RGPD export ready ${exportReq.id} (expires ${exportReq.expires_at})`)
-      const dl = await this.f.account.downloadExport(exportReq.id)
-      log.info(`Download URL ready (expires ${dl.expires_at})`)
+      log.ok(`RGPD export queued ${exportReq.id} (status ${exportReq.status})`)
+      const status = await this.f.exports.getExportStatus(exportReq.id)
+      log.info(`Export status=${status.status}${status.download_url ? ' — download URL ready' : ' (still processing)'}`)
     } catch (err) {
       log.warn(`account RGPD: ${describeError(err)}`)
     }
@@ -817,20 +821,32 @@ export class Scenario {
 
     // Credit note — list / get / update / delete on a draft, plus XML + email
     // on a finalized one (XML and email require a finalized document).
+    // A credit note can never exceed the total of its related invoice
+    // (cumulated across the invoice's credit notes), so the block uses a
+    // dedicated throwaway invoice — re-runs always start with a fresh cap.
     try {
       const list = await this.f.creditNotes.list({ limit: 5 })
       log.info(`creditNotes.list: ${list.data.length} item(s)`)
+
+      const cnInvoiceDraft = await this.f.invoices.create(
+        this.invoiceCreateBody(customer, [this.serviceLine(service, '1')]),
+        { idempotencyKey: idempotencyKey('cov-cn-invoice', `${Date.now()}`) },
+      )
+      const cnInvoice = await this.f.invoices.finalize(cnInvoiceDraft.id, {
+        idempotencyKey: idempotencyKey('cov-cn-invoice-fin', cnInvoiceDraft.id),
+      })
+
       const draft = await this.f.creditNotes.create(
         {
           customerId: customer.id,
-          relatedInvoiceId: invoice.id,
+          relatedInvoiceId: cnInvoice.id,
           creditNoteType: 'partial',
           reasonCode: 'quality',
           reason: 'Coverage credit note (draft)',
           items: [this.serviceLine(service, '1')],
           dates: { issued: isoDate() },
         },
-        { idempotencyKey: idempotencyKey('cov-credit-note-draft', invoice.id) },
+        { idempotencyKey: idempotencyKey('cov-credit-note-draft', cnInvoice.id) },
       )
       await this.f.creditNotes.get(draft.id)
       await this.f.creditNotes.update(draft.id, { notes: 'Coverage update' })
@@ -839,14 +855,14 @@ export class Scenario {
       const finalDraft = await this.f.creditNotes.create(
         {
           customerId: customer.id,
-          relatedInvoiceId: invoice.id,
+          relatedInvoiceId: cnInvoice.id,
           creditNoteType: 'partial',
           reasonCode: 'quality',
           reason: 'Coverage credit note (finalized)',
           items: [this.serviceLine(service, '1')],
           dates: { issued: isoDate() },
         },
-        { idempotencyKey: idempotencyKey('cov-credit-note-final', invoice.id) },
+        { idempotencyKey: idempotencyKey('cov-credit-note-final', cnInvoice.id) },
       )
       await this.f.creditNotes.finalize(finalDraft.id, { idempotencyKey: idempotencyKey('cov-cn-fin', finalDraft.id) })
       await this.f.creditNotes.getXml(finalDraft.id)
@@ -925,10 +941,12 @@ export class Scenario {
       log.warn(`receivedInvoices refuse/suspend: ${describeError(err)}`)
     }
 
-    // Webhook endpoint — get / update / delete on a throwaway.
+    // Webhook endpoint — get / update / delete on a throwaway. The URL must be
+    // a public, DNS-resolvable HTTPS host (validated at creation) — example.com
+    // resolves, and the endpoint is deleted right after.
     try {
       const wh = await this.f.webhookEndpoints.create(
-        { url: 'https://example.test/coverage-webhook', description: 'Coverage throwaway', events: ['invoice.finalized'] },
+        { url: 'https://example.com/coverage-webhook', description: 'Coverage throwaway', events: ['invoice.finalized'] },
         { idempotencyKey: idempotencyKey('cov-webhook') },
       )
       await this.f.webhookEndpoints.get(wh.id)

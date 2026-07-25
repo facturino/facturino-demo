@@ -7,21 +7,13 @@
         "php": ">=8.1",
         "ext-curl": "*",
         "ext-json": "*",
-        "facturino/facturino-php": "dev-main"
+        "facturino/facturino-php": "^1.0"
     },
-    "repositories": [
-        {
-            "type": "vcs",
-            "url": "https://github.com/facturino/facturino-php"
-        }
-    ],
     "autoload": {
         "psr-4": {
             "AtelierDupont\\": "src/"
         }
     },
-    "minimum-stability": "dev",
-    "prefer-stable": true,
     "config": {
         "sort-packages": true
     }

@@ -1097,7 +1097,10 @@ export class Scenario {
         .catch((e) => this.softError('billing.getInvoicePdf', e));
     }
 
-    // J.30 — RGPD: request a data export, then download it.
+    // J.30 — RGPD: request a data export, then poll the job. The download
+    // URL surfaces on `GET /v1/exports/:jobId` (`download_url`) once the
+    // worker has finished; `/account/exports/:id/download` serves the
+    // `export_ready` notification link (`rgpdexp_…` id), not the job id.
     step('account.requestExport → POST /account/export');
     try {
       const exportJob = await this.client.post<Job>(
@@ -1107,10 +1110,11 @@ export class Scenario {
       );
       detail(`export job=${exportJob.id} status=${exportJob.status}`);
       if (exportJob.id) {
-        step(`account.downloadExport → GET /account/exports/${exportJob.id}/download`);
-        await this.client
-          .get(`/account/exports/${exportJob.id}/download`)
-          .catch((e) => this.softError('account.downloadExport', e));
+        step(`exports.getStatus → GET /exports/${exportJob.id} (poll RGPD)`);
+        const status = await this.client
+          .get<Job & { download_url?: string }>(`/exports/${exportJob.id}`)
+          .catch((e) => this.softError('exports.getStatus', e));
+        if (status) detail(`status=${status.status}${status.download_url ? ' — download URL ready' : ' (still processing)'}`);
       }
     } catch (err) {
       this.softError('account.requestExport', err);

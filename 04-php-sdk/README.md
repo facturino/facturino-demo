@@ -60,10 +60,11 @@ overriding variables already exported in your shell.
 
 ## Run
 
-Start the HTTP server:
+Start the HTTP server (`max_execution_time` lifted: the full journey
+against the live API exceeds the CLI server's 30-second default):
 
 ```bash
-php -S localhost:4242 -t public public/index.php
+php -d max_execution_time=0 -S localhost:4242 -t public public/index.php
 ```
 
 Then drive the scenario:

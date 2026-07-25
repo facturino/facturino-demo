@@ -14,10 +14,7 @@
     "dev": "node --watch --experimental-strip-types src/server.ts"
   },
   "dependencies": {
-    "@facturino/node": "github:facturino/facturino-node"
-  },
-  "//dependencies": {
-    "@facturino/node": "Once published to npm, replace the VCS reference above with the registry version: \"^1.0.0\" (i.e. `npm install @facturino/node`)."
+    "@facturino/node": "^1.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.37",

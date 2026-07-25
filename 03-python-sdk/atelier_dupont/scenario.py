@@ -366,15 +366,22 @@ def phase_d_invoice(client: facturino.Client, log: list[dict[str, Any]], state: 
     _drive_pa_lifecycle(client, log, invoice_id)
 
     # D12 — collection. Payment links are Pro+; the manual payment always works.
-    _optional(
-        log,
-        "D12 invoices.create_payment_link",
-        lambda: client.invoices.create_payment_link(
-            invoice_id,
-            success_url=f"{_public(state)}/paid",
-            cancel_url=f"{_public(state)}/cancelled",
-        ),
-    )
+    # The success/cancel redirect URLs must be public — skip without a tunnel.
+    if _public(state):
+        _optional(
+            log,
+            "D12 invoices.create_payment_link",
+            lambda: client.invoices.create_payment_link(
+                invoice_id,
+                success_url=f"{_public(state)}/paid",
+                cancel_url=f"{_public(state)}/cancelled",
+            ),
+        )
+    else:
+        log.append({
+            "step": "D12 invoices.create_payment_link (skipped — set PUBLIC_BASE_URL for public redirect URLs)",
+            "ok": True,
+        })
     _optional(log, "D12 invoices.create_portal_link", lambda: client.invoices.create_portal_link(invoice_id))
     # Signed payment token for an embedded/headless checkout (Pro+).
     _optional(log, "D12 invoices.create_payment_token", lambda: client.invoices.create_payment_token(invoice_id))
@@ -579,6 +586,16 @@ def phase_h_webhooks(client: facturino.Client, log: list[dict[str, Any]], state:
     """H. Register the demo's /webhooks endpoint, send a test event, replay events."""
     webhook_url = state.get("webhook_url")
 
+    # Endpoint registration needs a public, DNS-resolvable HTTPS receiver —
+    # the API validates the host at creation. Without a tunnel (ngrok,
+    # cloudflared) exposed via PUBLIC_BASE_URL, skip the phase gracefully.
+    if not webhook_url:
+        log.append({
+            "step": "H19-H21 webhooks (skipped — set PUBLIC_BASE_URL to a public HTTPS tunnel)",
+            "ok": True,
+        })
+        return
+
     # H19 — register this server as a webhook endpoint (idempotent on URL).
     existing = _find_endpoint_by_url(client, webhook_url)
     if existing is not None:
@@ -701,13 +718,17 @@ def phase_j_admin(client: facturino.Client, log: list[dict[str, Any]], state: di
         _optional(log, "J29 billing.get_invoice_pdf", lambda: client.billing.get_invoice_pdf(bi["id"]))
 
     # J30 — RGPD: request a data export. It runs ASYNC — POST /account/export returns
-    # a 202 job (object:"job", id:…), so poll it to completion, then download the
-    # prepared archive via its short-lived signed URL.
+    # a 202 job (object:"job", id:"job_…"). The download URL surfaces on the job
+    # itself (GET /v1/exports/:jobId → download_url once the worker finished).
+    # account.download_export takes the "rgpdexp_…" id delivered by the
+    # export_ready notification, NOT the job id — it is not used here.
     export = _optional(log, "J30 account.request_export", client.account.request_export)
     export_id = extract_job_id(export) if isinstance(export, dict) else None
     if export_id:
         _optional(log, "J30 export poll", lambda: poll_job(client, export_id, timeout=30.0))
-        _optional(log, "J30 account.download_export", lambda: client.account.download_export(export_id))
+        status = _optional(log, "J30 exports.get_status", lambda: client.exports.get_status(export_id))
+        if isinstance(status, dict) and status.get("download_url"):
+            log.append({"step": "J30 download URL ready", "ok": True})
 
 
 # --------------------------------------------------------------------------- #

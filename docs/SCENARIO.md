@@ -110,7 +110,7 @@ les webhooks Facturino. Aucune UI lourde — la valeur est dans l'usage de l'API
 23. **Exports** — `exports.generateFec` + `exports.getFecStatus` (FEC),
     `exports.exportInvoices` + `exports.getExportStatus` (ZIP Factur-X).
     Le portage RGPD au niveau du compte est couvert en J via
-    `account.requestExport` / `account.downloadExport`.
+    `account.requestExport` + le poll du job (`exports.getExportStatus`).
 24. **E-reporting** — `ereporting.createDeclaration`, `ereporting.list`,
     `ereporting.get`, `ereporting.submitDeclaration`.
 25. **Archives** — `archives.list`, `archives.get`.
@@ -119,7 +119,10 @@ les webhooks Facturino. Aucune UI lourde — la valeur est dans l'usage de l'API
     `billing.listInvoices`, `billing.getInvoicePdf`. L'API billing est en
     **lecture seule** : le changement de plan, l'annulation et le portail de
     paiement se gèrent dans l'app web Facturino, pas via l'API.
-27. **RGPD (portabilité)** — `account.requestExport` + `account.downloadExport`.
+27. **RGPD (portabilité)** — `account.requestExport` (202 + job) puis poll du
+    job via `exports.getExportStatus` jusqu'à `download_url`.
+    (`account.downloadExport` sert le lien de la notification `export_ready`,
+    avec un id `rgpdexp_…` — pas l'id du job.)
 
 ### Hors périmètre de l'API développeur (gérés dans l'app web Facturino)
 - La **connexion PA (BYOPA)**, le **changement de plan/abonnement**, les **clés

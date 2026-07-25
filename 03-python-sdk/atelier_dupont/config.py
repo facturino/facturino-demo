@@ -48,7 +48,14 @@ class Settings:
 
     @property
     def webhook_url(self) -> str:
-        """The publicly reachable URL Facturino will POST events to."""
+        """The publicly reachable URL Facturino will POST events to.
+
+        Empty when ``PUBLIC_BASE_URL`` is not set — the scenario then skips
+        webhook registration (the API only accepts public, DNS-resolvable
+        HTTPS receivers).
+        """
+        if not self.public_base_url:
+            return ""
         return f"{self.public_base_url.rstrip('/')}/webhooks"
 
 
@@ -75,9 +82,9 @@ def get_settings() -> Settings:
         api_key=api_key,
         base_url=base_url,
         webhook_secret=os.environ.get("FACTURINO_WEBHOOK_SECRET", "").strip(),
-        public_base_url=os.environ.get(
-            "PUBLIC_BASE_URL", "https://your-tunnel.example.com"
-        ).strip(),
+        # No default: webhook registration requires a public HTTPS tunnel
+        # (ngrok, cloudflared…) — without one the scenario skips phase H.
+        public_base_url=os.environ.get("PUBLIC_BASE_URL", "").strip(),
         port=int(os.environ.get("PORT", "4242")),
     )
 
