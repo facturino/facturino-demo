@@ -1,167 +1,179 @@
-# Scénario commun — "Atelier Dupont" (mini-SaaS B2B)
+# Shared scenario — "Atelier Dupont" (B2B mini-SaaS)
 
-Les cinq démos implémentent **le même parcours**, dans cinq stacks différentes.
-Le but : montrer comment un SaaS B2B français pilote **100 % de sa facturation
-via Facturino**, du premier client jusqu'à la comptabilité.
+All five demos implement the **same journey** in five different stacks. The
+goal is to show how a French B2B SaaS manages **all of its billing through
+Facturino**, from its first customer to accounting exports.
 
-Personae : *Atelier Dupont SAS*, un studio qui vend des prestations et un
-abonnement mensuel à ses clients pros. Il encaisse via Facturino, dépose ses
-factures à la PA (réforme e-invoicing française), et exporte sa compta.
+The fictional company, *Atelier Dupont SAS*, sells one-off services and a
+monthly subscription to business customers. It collects payments through
+Facturino, submits invoices to its Plateforme Agréée (PA), and exports its
+accounts.
 
-Chaque démo est une petite application backend exécutable : un serveur HTTP
-expose des routes qui déclenchent les étapes, plus un endpoint public qui reçoit
-les webhooks Facturino. Aucune UI lourde — la valeur est dans l'usage de l'API.
+Each demo is a small executable backend. Its HTTP server exposes routes that
+run scenario phases and a public endpoint that receives Facturino webhooks.
+There is no full UI: the examples focus on API usage.
 
 ---
 
-## Le parcours (ordre d'exécution)
+## Journey and execution order
 
-> Chaque étape cite les opérations Facturino utilisées. La numérotation des
-> familles sert à vérifier que **l'union des étapes couvre toutes les familles
-> d'API** (voir « Couverture » en bas).
+> Every step names the Facturino operations it uses. The numbered API families
+> make it possible to verify that the union of all phases covers the public API
+> surface listed at the end.
 
-### A. Bootstrap du compte SaaS
-1. **Qui suis-je** — `account.retrieve` : vérifier la clé, le plan, le livemode.
-2. **Société émettrice** — `companies.list` / `companies.get`.
-2b. **CGV & onboarding** — `companies.uploadCgv` / `getCgv` / `deleteCgv`
-   (conditions générales de vente, PDF encodé en base64) puis
-   `companies.addMilestone` (jalon d'onboarding, ex. `firstInvoice`).
-3. **Référentiels** — `reference.listLegalForms`, `reference.listNafCodes`.
-   (La connexion PA / BYOPA se configure dans l'app web Facturino, pas via
-   l'API ; la démo suppose une PA déjà connectée, ou force les transitions de
-   statut PA en mode test avec `sandbox.simulateStatus`.)
-4. **Quotas** — `usage.retrieve` : afficher consommation vs limites du plan.
+### A. Bootstrap the SaaS account
 
-### B. Catalogue & client
-5. **Produits** — `products.create` (abonnement mensuel + prestation à l'unité),
-   `products.list` (dont filtres `q` recherche par nom, `category`, `active`),
-   `products.get`, `products.update`. Import/export :
-   `products.importCsv` / `products.exportCsv`.
-6. **Client** — `customers.lookup` (SIRENE/VIES) puis `customers.create` (avec un
-   contact `role: billing` qui reçoit les factures par défaut),
-   `customers.get`, `customers.update`, `customers.list`. CSV :
+1. **Current account** — `account.retrieve`: verify the key, plan, and
+   `livemode`.
+2. **Issuing company** — `companies.list` / `companies.get`.
+2b. **Terms and onboarding** — `companies.uploadCgv` / `getCgv` / `deleteCgv`
+   for the base64-encoded terms PDF, then `companies.addMilestone` for an
+   onboarding milestone such as `firstInvoice`.
+3. **Reference data** — `reference.listLegalForms`,
+   `reference.listNafCodes`. PA connection (BYOPA) is configured in the
+   Facturino web app, not through the public API. The demo therefore assumes a
+   PA is connected or simulates PA status transitions in test mode with
+   `sandbox.simulateStatus`.
+4. **Quota usage** — `usage.retrieve`: display consumption and plan limits.
+
+### B. Product catalogue and customer
+
+5. **Products** — `products.create` for a monthly subscription and a one-off
+   service; `products.list` with the `q`, `category`, and `active` filters;
+   `products.get`; `products.update`; and `products.importCsv` /
+   `products.exportCsv`.
+6. **Customer** — `customers.lookup` (SIRENE/VIES), then
+   `customers.create` with a `billing` contact that receives invoices by
+   default; `customers.get`; `customers.update`; `customers.list`; and
    `customers.importCsv` / `customers.exportCsv`.
 
-### C. Devis → facture
-7. **Devis** — `quotes.create`, `quotes.send`, `quotes.get`, `quotes.accept`,
-   `quotes.getPdf`, `quotes.getSignatureProof`, `quotes.clone` (re-proposer un
-   devis similaire en brouillon), puis `quotes.convert` (→ facture brouillon).
-8. **Validation amont** — `validate.run` sur le payload de facture avant
-   création (montre la validation EN16931 sans rien émettre).
+### C. Quote to invoice
 
-### D. Cycle de vie facture
-9. **Créer / finaliser** — `invoices.create` (buyer BG-7, lignes, payment,
-   purchaseOrderNumber BT-13), `invoices.finalize` (numérotation),
-   `invoices.get`, `invoices.getStatus`, `invoices.list` (dont filtre
-   `convertedFrom` : retrouver les factures issues du devis converti).
-10. **Documents** — `invoices.getPdf`, `invoices.getFacturx`, `invoices.getXml`
-    (CII + UBL), via `jobs.poll` quand la génération est asynchrone.
-11. **Dépôt PA** — `invoices.send` (dépôt à la plateforme).
-12. **Encaissement** — `invoices.createPaymentLink` (Stripe),
-    `invoices.createPortalLink`, `invoices.createPaymentToken` (jeton de
-    paiement signé), puis `payments.create` + `payments.list`.
-13. **Relance & retard** — `invoices.remind` ; `invoices.listEvents`.
-14. **Piste d'audit** — `invoices.verify` (chaîne de hash),
-    `invoices.getAuditTrail`, `invoices.generateAuditTrailPdf`.
-15. **Clone** — `invoices.clone` (récurrence manuelle ponctuelle).
+7. **Quote** — `quotes.create`, `quotes.send`, `quotes.get`, `quotes.accept`,
+   `quotes.getPdf`, `quotes.getSignatureProof`, `quotes.clone`, then
+   `quotes.convert` to produce a draft invoice.
+8. **Preflight validation** — `validate.run` on the invoice payload before
+   creation, demonstrating EN16931 validation without issuing a document.
 
-### D bis. Acomptes & échéanciers (facturation avancée — supporté par l'API)
-15b. **Facture d'acompte (386)** — `invoices.create({ type: 'deposit', … })` puis
-    `invoices.finalize` : facture d'acompte encaissée d'avance.
-15c. **Facture de solde avec déduction** —
-    `invoices.create({ …, deposits: [{ invoiceId: '<acompte>' }] })` : l'acompte est
-    déduit (BT-113 prépayé), le montant dû = TTC − acomptes (BR-CO-16).
-15d. **Échéancier (paiement en plusieurs fois)** —
-    `invoices.create({ …, schedule: [{ amount, dueDate, label }] })` : 2 à 12
-    versements (montants en centimes) sommant au restant dû, le dernier à la date
-    d'échéance (BT-9). Le montant est en centimes entiers, comme partout dans l'API.
-    > Les runners de référence exécutent le flux standard. Ces paramètres (`type`,
-    > `deposits`, `schedule`) sont **additifs** et documentés ici pour la vitrine.
+### D. Invoice lifecycle
 
-### E. Abonnement récurrent (cœur SaaS)
-16. **Récurrence** — `recurringInvoices.create` (mensuel),
-    `recurringInvoices.list`, `recurringInvoices.get`,
-    `recurringInvoices.update`, `recurringInvoices.pause`,
-    `recurringInvoices.resume`.
+9. **Create and finalize** — `invoices.create` with buyer BG-7, lines, payment
+   terms, and purchase-order number BT-13; `invoices.finalize` for numbering;
+   `invoices.get`; `invoices.getStatus`; and `invoices.list` with
+   `convertedFrom` to find invoices created from the quote.
+10. **Documents** — `invoices.getPdf`, `invoices.getFacturx`, and
+    `invoices.getXml` (CII and UBL), polling asynchronous generation with
+    `jobs.poll` when required.
+11. **PA submission** — `invoices.send`.
+12. **Payment** — `invoices.createPaymentLink`,
+    `invoices.createPortalLink`, `invoices.createPaymentToken`, then
+    `payments.create` and `payments.list`.
+13. **Reminder and overdue state** — `invoices.remind` and
+    `invoices.listEvents`.
+14. **Audit trail** — `invoices.verify`, `invoices.getAuditTrail`, and
+    `invoices.generateAuditTrailPdf`.
+15. **Clone** — `invoices.clone` for an occasional manual recurrence.
 
-### F. Avoir
-17. **Remboursement / correction** — `creditNotes.create` (lié à la facture),
-    `creditNotes.finalize`, `creditNotes.send`, `creditNotes.getPdf`,
-    `creditNotes.getFacturx`, puis `invoices.get` avec `expand=credit_notes`
-    (avoirs liés + solde net de la facture).
+### D2. Deposits and payment schedules
 
-### G. Achats (factures reçues)
-18. **Entrant** — `invoices.createIncoming` / `invoices.listIncoming` ;
-    `receivedInvoices.list`, `receivedInvoices.get`,
-    `receivedInvoices.approve` / `refuse` / `suspend`,
-    `receivedInvoices.recordPayment`.
+15b. **Deposit invoice (type 386)** — create an invoice with
+     `type: 'deposit'`, then finalize it.
+15c. **Balance invoice** — create the final invoice with
+     `deposits: [{ invoiceId: '<deposit>' }]`; the paid deposit becomes BT-113
+     prepaid amount and reduces the amount due.
+15d. **Payment schedule** — pass two to twelve entries through
+     `schedule: [{ amount, dueDate, label }]`. Amounts are integer cents, their
+     sum equals the remaining amount due, and the last installment is due on
+     the invoice due date (BT-9).
 
-### H. Webhooks (asynchrone, temps réel)
-19. **Endpoint** — `webhookEndpoints.create` (URL publique du serveur démo +
-    events voulus), `webhookEndpoints.list`, `webhookEndpoints.test`.
-20. **Réception** — la route `/webhooks` vérifie la **signature** et traite
-    `invoice.finalized`, `invoice.transmitted`, `invoice.paid`,
-    `quote.accepted`, etc. La démo « sans SDK » vérifie la signature à la main ;
-    les démos SDK utilisent le helper `webhooks.*`.
-21. **Rejeu** — `events.list`, `events.get`, `events.retry`.
+> The reference runners execute the standard path. Deposit and schedule
+> parameters are additive examples documented here for discoverability.
 
-### I. Comptabilité & pilotage
-22. **Reporting** — `reporting.vatReport`, `reporting.revenueReport`.
-23. **Exports** — `exports.generateFec` + `exports.getFecStatus` (FEC),
-    `exports.exportInvoices` + `exports.getExportStatus` (ZIP Factur-X).
-    Le portage RGPD au niveau du compte est couvert en J via
-    `account.requestExport` + le poll du job (`exports.getExportStatus`).
-24. **E-reporting** — `ereporting.createDeclaration`, `ereporting.list`,
-    `ereporting.get`, `ereporting.submitDeclaration`.
-25. **Archives** — `archives.list`, `archives.get`.
-### J. Compte & facturation (API développeur — lecture seule)
-26. **Facturation Facturino** — `billing.retrieveSubscription`,
-    `billing.listInvoices`, `billing.getInvoicePdf`. L'API billing est en
-    **lecture seule** : le changement de plan, l'annulation et le portail de
-    paiement se gèrent dans l'app web Facturino, pas via l'API.
-27. **RGPD (portabilité)** — `account.requestExport` (202 + job) puis poll du
-    job via `exports.getExportStatus` jusqu'à `download_url`.
-    (`account.downloadExport` sert le lien de la notification `export_ready`,
-    avec un id `rgpdexp_…` — pas l'id du job.)
+### E. Recurring subscription
 
-### Hors périmètre de l'API développeur (gérés dans l'app web Facturino)
-- La **connexion PA (BYOPA)**, le **changement de plan/abonnement**, les **clés
-  API**, les **membres/équipe**, les **notifications produit**, la **MFA** et les
-  **cabinets** sont des surfaces d'interface (compte, sécurité, équipe) — hors
-  API développeur, donc non exercées par cette démo.
-- **Sandbox** (`sandbox.simulateStatus`) : en mode `fac_test_`, sert à forcer
-  une transition de statut PA pour démontrer la chaîne de webhooks sans
-  attendre la vraie PA. Utilisé pour rendre la démo déterministe.
+16. **Recurrence** — `recurringInvoices.create`, `list`, `get`, `update`,
+    `pause`, and `resume`.
 
----
+### F. Credit note
 
-## Conventions transverses (toutes les démos)
+17. **Correction and refund** — `creditNotes.create` linked to the invoice,
+    `creditNotes.finalize`, `creditNotes.send`, `creditNotes.getPdf`, and
+    `creditNotes.getFacturx`; then retrieve the invoice with
+    `expand=credit_notes` to obtain linked credit notes and the net balance.
 
-- **Montants** : entiers en centimes (`10000` = 100,00 €). **TVA** : centièmes
-  de pourcent (`2000` = 20,00 %). Jamais de float.
-- **Idempotence** : `Idempotency-Key` sur chaque POST de création (régénéré par
-  étape, stable en cas de retry).
-- **Pagination** : cursor-based (`starting_after`), suivre `has_more`.
-- **Erreurs** : format `{ error: { type, code, message, param, doc_url,
-  request_id, hint } }`. Les démos affichent `request_id` pour le support.
-- **Idempotence métier** : le scénario est rejouable (lookup-or-create sur le
-  client, réutilisation d'un brouillon existant).
-- **Config** : tout vient de l'environnement — `FACTURINO_API_KEY` (fac_test_),
-  `FACTURINO_BASE_URL` (défaut `https://facturino.com/api/v1`),
-  `FACTURINO_WEBHOOK_SECRET`, `PORT`. Voir `.env.example`.
-- **Déterminisme** : en `fac_test_`, on utilise `sandbox.simulateStatus` pour
-  faire avancer les statuts PA, sinon la démo attendrait un dépôt réel.
+### G. Purchases and received invoices
+
+18. **Incoming invoice** — `invoices.createIncoming` /
+    `invoices.listIncoming`; `receivedInvoices.list`, `get`, `approve`,
+    `refuse`, `suspend`, and `recordPayment`.
+
+### H. Webhooks
+
+19. **Endpoint** — `webhookEndpoints.create` with the public demo URL and
+    selected events; `webhookEndpoints.list`; `webhookEndpoints.test`.
+20. **Delivery** — `/webhooks` verifies the signature and handles events such
+    as `invoice.finalized`, `invoice.transmitted`, `invoice.paid`, and
+    `quote.accepted`. The no-SDK demo verifies signatures manually; SDK demos
+    use their `webhooks.*` helper.
+21. **Replay** — `events.list`, `events.get`, and `events.retry`.
+
+### I. Accounting and reporting
+
+22. **Reports** — `reporting.vatReport` and `reporting.revenueReport`.
+23. **Exports** — `exports.generateFec` + `exports.getFecStatus`, and
+    `exports.exportInvoices` + `exports.getExportStatus`. Account portability
+    is covered in phase J through `account.requestExport` and job polling.
+24. **E-reporting** — `ereporting.createDeclaration`, `list`, `get`, and
+    `submitDeclaration`.
+25. **Archives** — `archives.list` and `archives.get`.
+
+### J. Account and Facturino billing
+
+26. **Facturino subscription** — `billing.retrieveSubscription`,
+    `billing.listInvoices`, and `billing.getInvoicePdf`. Billing is read-only
+    in the public API; plan changes, cancellation, and the billing portal are
+    handled by the Facturino web app.
+27. **Data portability** — `account.requestExport` returns a job; poll it with
+    `exports.getExportStatus` until `download_url` is available.
+    `account.downloadExport` serves the signed link from an `export_ready`
+    notification and uses a different `rgpdexp_…` identifier.
+
+### Outside the public developer API
+
+- PA connection (BYOPA), subscription changes, API keys, team membership,
+  product notifications, MFA, and cabinet management belong to authenticated
+  web-app surfaces and are intentionally not exercised by these demos.
+- In `fac_test_` mode, `sandbox.simulateStatus` advances PA states without a
+  real submission and keeps the scenario deterministic.
 
 ---
 
-## Couverture des familles d'API
+## Shared conventions
 
-Le parcours ci-dessus touche chaque famille au moins une fois :
+- **Amounts** are integer cents (`10000` = EUR 100.00). **VAT rates** are
+  hundredths of a percent (`2000` = 20.00%). Never use floating point.
+- **Idempotency** — every creation POST uses an `Idempotency-Key` that remains
+  stable for retries of the same logical operation.
+- **Pagination** — follow forward cursors through `starting_after` and
+  `has_more`.
+- **Errors** — decode `{ error: { type, code, message, param, doc_url,
+  request_id, hint } }` and surface `request_id` for support.
+- **Business replayability** — lookup-or-create resources and reuse an existing
+  draft so that the scenario can be run repeatedly.
+- **Configuration** — use `FACTURINO_API_KEY`, `FACTURINO_BASE_URL`,
+  `FACTURINO_WEBHOOK_SECRET`, `PUBLIC_BASE_URL`, and `PORT` from the process
+  environment. See the repository `.env.example`; never commit credentials.
+- **Safety** — use only `fac_test_` keys. Potentially real-world operations are
+  guarded explicitly by the runners.
+
+## Covered API families
+
+The combined journey touches every public family at least once:
 
 account · archives · billing · companies · creditNotes · customers ·
 ereporting · events · exports · invoices · jobs · payments · products ·
 quotes · receivedInvoices · recurringInvoices · reference · reporting ·
-sandbox · usage · validate · webhookEndpoints · webhooks(réception)
+sandbox · usage · validate · webhookEndpoints · webhook delivery
 
-Chaque démo inclut, à la fin de son README, une **table de correspondance
-étape → méthode SDK (ou requête HTTP pour la démo sans SDK)**.
+Each stack README ends with a phase-to-method table (or phase-to-request table
+for the no-SDK implementation).

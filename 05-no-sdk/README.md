@@ -26,8 +26,8 @@ hand. Read it to understand exactly what an SDK does for you under the hood:
 - A **test-mode** API key (`fac_test_…`). The demo refuses a `fac_live_` key.
 
 > This demo has no SDK dependency, so there is nothing to install from a
-> registry. The other four demos pull a Facturino SDK from its public Git
-> repo (and, once published, the standard registry command:
+> registry. The other four demos install a published Facturino SDK with the
+> standard registry command:
 > `npm install @facturino/node`, `pip install facturino`,
 > `composer require facturino/facturino-php`, `go get …`). Here, the
 > `dependencies` block in `package.json` is intentionally empty.

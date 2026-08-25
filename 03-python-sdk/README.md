@@ -17,7 +17,7 @@ same scenario described in [`../docs/SCENARIO.md`](../docs/SCENARIO.md).
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.10+ (the published SDK's minimum)
 - A Facturino **test-mode** API key (`fac_test_…`)
 - For live webhook delivery: a public tunnel (e.g. `cloudflared`, `ngrok`)
   pointing at this server's `/webhooks` route

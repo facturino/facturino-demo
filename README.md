@@ -24,7 +24,7 @@ exactly what the SDKs do under the hood.
 ## Requirements
 
 - A **test-mode** API key (`fac_test_…`). The demos never touch live data.
-- Per stack: Node 20+, Go 1.21+, Python 3.9+, or PHP 8.1+.
+- Per stack: Node 20+, Go 1.21+, Python 3.10+, or PHP 8.1+.
 
 ## Setup
 
@@ -37,11 +37,11 @@ Then follow the README inside the demo you want to run. Each one starts a small
 HTTP server: some routes trigger scenario steps, and `/webhooks` receives
 Facturino events.
 
-> **Installing the SDK.** The SDK packages are installed straight from their
-> public Git repositories (see each demo's manifest). Once they are published to
-> the public registries, the standard install command (`npm install
-> @facturino/node`, `pip install facturino`, `composer require
-> facturino/facturino-php`, `go get …`) works as-is — each README shows it.
+> **Installing the SDK.** All four SDKs are published. The manifests resolve
+> them through npm, PyPI, Packagist, or the Go module proxy. Standard install
+> commands (`npm install @facturino/node`, `pip install facturino`, `composer
+> require facturino/facturino-php`, `go get …`) work directly; each stack README
+> documents its pinned range.
 
 ## Amounts and rates
 

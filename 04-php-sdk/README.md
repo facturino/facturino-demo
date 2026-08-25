@@ -20,18 +20,17 @@ web server. The only runtime dependency is the SDK.
 
 ## Install
 
-The SDK is pulled straight from its public Git repository (see
-`composer.json`, `repositories` → `vcs`):
+The SDK is installed from Packagist through the version range declared in
+`composer.json`:
 
 ```bash
 composer install
 ```
 
-Once the package is published to Packagist, the standard command works as-is
-and you can drop the `repositories`/`dev-main` pin:
+To add or refresh the dependency explicitly:
 
 ```bash
-# composer require facturino/facturino-php:^1.0
+composer require facturino/facturino-php:^1.0
 ```
 
 ## Configure
@@ -132,7 +131,7 @@ replay window). To receive real events, expose the server with a tunnel
 
 ```
 04-php-sdk/
-├── composer.json              # SDK via VCS repo + dev-main
+├── composer.json              # published SDK from Packagist
 ├── public/index.php           # front controller / router (php -S target)
 └── src/
     ├── bootstrap.php          # .env loader + autoload + SDK init

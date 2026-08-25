@@ -17,17 +17,16 @@ the SDK's webhook helper. It can also run the whole parcours once from the CLI.
 
 ## Install the SDK dependency
 
-The SDK is consumed from its public Git repository. Once it carries a published
-semantic-version tag, the standard command resolves it over VCS:
+The SDK is published as a Go module. This demo's `go.mod` currently pins
+`v1.0.0`. To upgrade explicitly to the current compatible release:
 
 ```bash
-go get github.com/facturino/facturino-go@v1.0.0
+go get github.com/facturino/facturino-go@v1.1.0
 ```
 
-While developing inside this monorepo, `go.mod` keeps a `replace` directive
-pointing the import at the sibling SDK checkout (`../../facturino-go`) so the
-demo builds with no network round-trip. Remove that directive to build strictly
-against the tagged release.
+For local development against the sibling SDK checkout, copy
+`go.work.example` to an **untracked** `go.work`. Never commit a `replace` with a
+local path: the tracked `go.mod` must remain consumable by any public clone.
 
 ```bash
 go mod tidy   # resolves dependencies (no-op extra deps: standard library only)
