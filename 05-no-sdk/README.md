@@ -17,7 +17,7 @@ hand. Read it to understand exactly what an SDK does for you under the hood:
 | Cursor pagination | `src/client.ts` | `list()` / `listAll()` follow `has_more` + `next_cursor` (`starting_after`) |
 | Webhook signature | `src/webhook.ts` | reads the **raw body**, recomputes `HMAC-SHA256(secret, "${t}.${raw}")`, timing-safe compare, replay window |
 | HTTP server | `src/server.ts` | `POST /run`, `POST /webhooks`, `GET /health` on `node:http` |
-| Scenario | `src/scenario.ts` | the A→J parcours, one method per phase |
+| Scenario | `src/scenario.ts` | the A→K workflow, one method per phase |
 
 ## Prerequisites
 
@@ -71,7 +71,7 @@ node --env-file=.env dist/server.js
 Then, in another terminal:
 
 ```bash
-# Run the whole A→J scenario against the API
+# Run the whole A→K scenario against the API
 curl -X POST http://localhost:4242/run
 
 # Liveness + config sanity check
@@ -124,7 +124,7 @@ Every row is a real request issued by `src/scenario.ts`.
 | A.3 | reference.listLegalForms / listNafCodes | `GET /reference/legal-forms` · `GET /reference/naf-codes` |
 | A.4 | usage.retrieve | `GET /usage` |
 
-### B. Catalogue & client
+### B. Product catalogue and customer
 
 | Step | Operation | HTTP request |
 |---|---|---|
@@ -136,7 +136,7 @@ Every row is a real request issued by `src/scenario.ts`.
 | B.6 | customers.create (contact `role: billing`) / get / update / list | `POST /customers` · `GET /customers/{id}` · `PATCH /customers/{id}` · `GET /customers` |
 | B.6 | customers.exportCsv / importCsv | `GET /customers/export` · `POST /customers/import` |
 
-### C. Devis → facture
+### C. Quote to invoice
 
 | Step | Operation | HTTP request |
 |---|---|---|
@@ -144,17 +144,17 @@ Every row is a real request issued by `src/scenario.ts`.
 | C.7 | quotes.getPdf / getSignatureProof | `GET /quotes/{id}/pdf` · `GET /quotes/{id}/signature-proof` |
 | C.7 | quotes.clone (re-proposition brouillon) | `POST /quotes/{id}/clone` |
 | C.7 | quotes.convert | `POST /quotes/{id}/convert` |
-| C.8 | validate.run | `POST /validate` |
+| C.8 | taxDecisions.create + validate.run (decision-backed dry-run) | `POST /tax-decisions` · `POST /validate` |
 
-### D. Cycle de vie facture
+### D. Invoice lifecycle
 
 | Step | Operation | HTTP request |
 |---|---|---|
-| D.9 | invoices.create / finalize / get / getStatus | `POST /invoices` · `POST /invoices/{id}/finalize` · `GET /invoices/{id}` · `GET /invoices/{id}/status` |
+| D.9 | invoices.create from the decision / finalize / get / getStatus | `POST /invoices` (`taxDecisionId` + `decisionLines`) · `POST /invoices/{id}/finalize` · `GET /invoices/{id}` · `GET /invoices/{id}/status` |
 | D.9 | invoices.list (convertedFrom) | `GET /invoices?convertedFrom=quo_…` |
 | D.10 | invoices.getPdf / getFacturx / getXml | `GET /invoices/{id}/pdf` · `GET /invoices/{id}/facturx` · `GET /invoices/{id}/xml?format=cii|ubl` |
 | D.10 | jobs.poll | `GET /jobs/{id}` |
-| D.11 | invoices.send (dépôt PA) | `POST /invoices/{id}/send` |
+| D.11 | invoices.send (deposit to the PA) | `POST /invoices/{id}/send` |
 | — | sandbox.simulateStatus (test mode) | `POST /sandbox/simulate-status/{id}` |
 | D.12 | invoices.createPaymentLink / createPortalLink / createPaymentToken | `POST /invoices/{id}/payment-link` · `POST /invoices/{id}/portal-link` · `POST /invoices/{id}/payment-token` |
 | D.12 | payments.create / list | `POST /invoices/{id}/payments` · `GET /invoices/{id}/payments` |
@@ -162,14 +162,44 @@ Every row is a real request issued by `src/scenario.ts`.
 | D.14 | invoices.verify / getAuditTrail / generateAuditTrailPdf | `GET /invoices/{id}/verify` · `GET /invoices/{id}/audit-trail` · `POST /invoices/{id}/audit-trail/pdf` |
 | D.15 | invoices.clone | `POST /invoices/{id}/clone` |
 
-### E. Abonnement récurrent
+### E. Recurring subscription
 
 | Step | Operation | HTTP request |
 |---|---|---|
 | E.16 | recurringInvoices.create / list / get / update | `POST /recurring-invoices` · `GET /recurring-invoices` · `GET`/`PATCH /recurring-invoices/{id}` |
 | E.16 | recurringInvoices.pause / resume | `POST /recurring-invoices/{id}/pause` · `POST /recurring-invoices/{id}/resume` |
 
-### F. Avoir
+### K. Decision-backed invoicing
+
+This phase is the reference for the exact wire shape of the fiscal contract.
+
+| Step | Operation | HTTP request |
+|---|---|---|
+| K.29 | taxDecisions.create — decide BEFORE charging | `POST /tax-decisions` with `Idempotency-Key` |
+| K.33 | taxDecisions.retrieve — verify after capture | `GET /tax-decisions/{id}` |
+| K.35 | invoices.create backed by the decision | `POST /invoices` with `taxDecisionId` + `decisionLines` (never `lines`) |
+| K.36 | invoices.finalize | `POST /invoices/{id}/finalize` |
+| K.37 | invoices.send — only if `invoiceChannel == einvoicing` | `POST /invoices/{id}/send` |
+| K.11b | Deposit invoice, decided, invoiced and settled in full | `POST /tax-decisions` (`category: "deposit"` + `relatedCategory`) · `POST /invoices` (`type: "deposit"`, `taxDecisionId` + `decisionLines`) · `POST /invoices/{id}/finalize` · `POST /invoices/{id}/payments` — deducting it (`deposits`/`schedule`) is refused with `taxDecisionId` and belongs to the app's internal commercial draft |
+| K.12 | Credit note on a decided invoice | `POST /credit-notes` with `creditedLines` (the VAT is inherited, never restated) |
+| K.13 | Recurrence on the decided journey | `POST /recurring-invoices` with `taxInputs` and its `taxSource` |
+| K.14 | VAT supplied by the integration | `POST /tax-decisions` with `taxSource: "integration"` (supplied `vatRate`/`vatCode`/`vatexCode`), refusal `integration_vat_incoherent` |
+
+A decision is immutable: there is no `PATCH`, `PUT` or `DELETE` on
+`/tax-decisions/{id}` — the API answers `405`. To re-decide the same operation
+after supplying missing evidence, `POST` a new decision with
+`retryOfTaxDecisionId`.
+
+The settlement carries its OWN reference — a transfer wording, a mandate
+reference, a cheque number, a PSP charge id — and the decision id travels
+alongside it. Replacing the payment reference with the decision id would lose
+what reconciles the ledger entry with the bank statement.
+
+Only a `final` decision carries amounts. On `pending_verification` or
+`unsupported`, `totals` and `amountToCharge` are `null` — never `0` — and
+`issues` lists what is missing.
+
+### F. Credit note
 
 | Step | Operation | HTTP request |
 |---|---|---|
@@ -177,7 +207,7 @@ Every row is a real request issued by `src/scenario.ts`.
 | F.17 | creditNotes.getPdf / getFacturx | `GET /credit-notes/{id}/pdf` · `GET /credit-notes/{id}/facturx` |
 | F.17 | invoices.get (expand credit_notes + net_balance) | `GET /invoices/{id}?expand=credit_notes` |
 
-### G. Achats (factures reçues)
+### G. Purchases and received invoices
 
 | Step | Operation | HTTP request |
 |---|---|---|
@@ -194,7 +224,7 @@ Every row is a real request issued by `src/scenario.ts`.
 | H.20 | webhooks reception | `POST /webhooks` (this server — verified in `src/webhook.ts`) |
 | H.21 | events.list / get / retry | `GET /events` · `GET /events/{id}` · `POST /events/{id}/retry` |
 
-### I. Comptabilité & pilotage
+### I. Accounting and reporting
 
 | Step | Operation | HTTP request |
 |---|---|---|
@@ -204,13 +234,13 @@ Every row is a real request issued by `src/scenario.ts`.
 | I.24 | ereporting.createDeclaration / list / get / submit† | `POST /ereporting/declarations` · `GET /ereporting/declarations` · `GET /…/{id}` · `POST /…/{id}/submit` |
 | I.25 | archives.list / get | `GET /archives` · `GET /archives/{invoiceId}` |
 
-### J. Administration du compte
+### J. Account and Facturino billing
 
 Over the REST API, administration is limited to **Facturino's own billing
 (read-only)** and **RGPD data portability**. API keys, team members,
 subscription changes (upgrade/cancel/portal) and account deletion are managed
 in the Facturino web app — they are not part of the developer REST surface — so
-the parcours does not call them.
+the workflow does not call them.
 
 | Step | Operation | HTTP request |
 |---|---|---|
@@ -222,7 +252,7 @@ the parcours does not call them.
 
 ## What's covered
 
-API families touched by the parcours (union of all steps):
+API families touched by the workflow (union of all steps):
 
 `account · archives · billing · companies · creditNotes · customers ·
 ereporting · events · exports · invoices · jobs · payments · products ·

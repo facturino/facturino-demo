@@ -4,7 +4,7 @@
 // Two modes:
 //
 //	./facturino-demo            start the HTTP server (routes + /webhooks)
-//	./facturino-demo -run       run the full A..J parcours once and exit
+//	./facturino-demo -run       run the full A..K workflow once and exit
 //
 // Configuration comes from the environment (see the repository
 // .env.example). A test-mode API key (fac_test_) is required; the demo

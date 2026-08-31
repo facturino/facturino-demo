@@ -33,7 +33,7 @@ pip install -r requirements.txt
 `requirements.txt` installs the SDK from PyPI:
 
 ```text
-facturino>=1.0
+facturino>=2.0
 flask>=3.0
 ```
 
@@ -74,10 +74,10 @@ python -m atelier_dupont
 Then drive it:
 
 ```bash
-# Run the entire A→J journey and get a structured report
+# Run the entire A→K journey and get a structured report
 curl -X POST http://localhost:4242/run | python -m json.tool
 
-# Run a single phase (a..j) — prerequisites are bootstrapped automatically
+# Run a single phase (a..k) — prerequisites are bootstrapped automatically
 curl -X POST http://localhost:4242/run/d | python -m json.tool
 
 # Index of routes + phase list
@@ -111,7 +111,7 @@ never charges a card or mutates your account.
 │   ├── __main__.py      # `python -m atelier_dupont`
 │   ├── config.py        # env loading + client factory (base-URL normalization)
 │   ├── helpers.py       # idempotency keys, error formatting, job polling
-│   ├── scenario.py      # the A→J journey (one function per phase)
+│   ├── scenario.py      # the A→K journey (one function per phase)
 │   ├── webhooks.py      # signature verification + event dispatch
 │   └── app.py           # Flask server (routes)
 ├── requirements.txt
@@ -152,15 +152,15 @@ never charges a card or mutates your account.
 | B6 | Customer (SIRENE lookup, CRUD) | `customers.lookup`, `customers.create` (with a `role: billing` contact), `customers.get`, `customers.update`, `customers.list`, `customers.export_csv` |
 | C7 | Quote lifecycle | `quotes.create`, `quotes.send`, `quotes.get`, `quotes.accept`, `quotes.get_pdf`, `quotes.get_signature_proof`, `quotes.clone`, `quotes.convert` |
 | C8 | Upfront EN16931 validation | `validate.run` |
-| D9 | Create / finalize invoice | `invoices.create`, `invoices.get`, `invoices.finalize`, `invoices.get_status`, `invoices.list` (filter `convertedFrom`) |
+| D9 | Decide, create from the decision, finalize | `tax_decisions.create`, `invoices.create` (`taxDecisionId` + `decisionLines`), `invoices.get`, `invoices.finalize`, `invoices.get_status`, `invoices.list` (filter `convertedFrom`) |
 | D10 | Documents (PDF / Factur-X / XML) | `invoices.get_pdf`, `invoices.get_facturx`, `invoices.get_xml`, `jobs.get` (poll) |
 | D11 | PA deposit | `invoices.send` |
 | D12 | Collection | `invoices.create_payment_link`, `invoices.create_portal_link`, `invoices.create_payment_token`, `payments.create`, `payments.list` |
 | D13 | Reminder & events | `invoices.remind`, `invoices.list_events` |
 | D14 | Audit trail | `invoices.verify`, `invoices.get_audit_trail`, `invoices.generate_audit_trail_pdf` |
 | D15 | Clone | `invoices.clone` |
-| E16 | Recurring subscription | `recurring_invoices.create`, `recurring_invoices.list`, `recurring_invoices.get`, `recurring_invoices.update`, `recurring_invoices.pause`, `recurring_invoices.resume` |
-| F17 | Credit note | `credit_notes.create`, `credit_notes.finalize`, `credit_notes.send`, `credit_notes.get_pdf`, `credit_notes.get_facturx`, `invoices.get` (`expand=credit_notes` → linked credit notes + net balance) |
+| E16 | Recurring subscription (`taxInputs` + its `taxSource`) | `recurring_invoices.create`, `recurring_invoices.list`, `recurring_invoices.get`, `recurring_invoices.update`, `recurring_invoices.pause`, `recurring_invoices.resume` |
+| F17 | Credit note (`creditedLines`, inherited VAT) | `credit_notes.create`, `credit_notes.finalize`, `credit_notes.send`, `credit_notes.get_pdf`, `credit_notes.get_facturx`, `invoices.get` (`expand=credit_notes` → linked credit notes + net balance) |
 | G18 | Purchases (received invoices) | `invoices.create_incoming`, `invoices.list_incoming`, `received_invoices.list`, `received_invoices.retrieve`, `received_invoices.approve`, `received_invoices.refuse`*, `received_invoices.suspend`*, `received_invoices.record_payment` |
 | H19 | Webhook endpoint registration | `webhook_endpoints.create`, `webhook_endpoints.list`, `webhook_endpoints.get` |
 | H20 | Test + reception | `webhook_endpoints.test`, `Webhook.construct_event` (in `/webhooks`) |
@@ -171,6 +171,11 @@ never charges a card or mutates your account.
 | I25 | Archives | `archives.list`, `archives.get` |
 | J29 | Facturino billing (read-only) | `billing.retrieve_subscription`, `billing.list_invoices`, `billing.get_invoice_pdf` |
 | J30 | RGPD | `account.request_export`, `account.download_export` |
+| K | Decision-first billing | `tax_decisions.create`, `tax_decisions.retrieve`, `invoices.create` (`taxDecisionId` + `decisionLines`), `invoices.finalize`, `invoices.send` |
+| K | Deposit decided + settled, then deducted | `tax_decisions.create`, `invoices.create` (`type="deposit"`), `invoices.finalize`, `payments.create`, `invoices.create` (`deposits` + `schedule`, settled against the decided amount) |
+| K | Credit note on a decided invoice | `credit_notes.create` (`creditedLines`) |
+| K | Recurrence on the decided journey | `recurring_invoices.create` (`taxInputs`) |
+| K14 | VAT supplied by the integration (`tax_source="integration"`) | `tax_decisions.create` (supplied `vat_rate`/`vat_code`/`vatex_code`), `invoices.create`, refusal `integration_vat_incoherent` |
 | — | Determinism (test mode) | `sandbox.simulate_status` |
 
 > API keys, team members and subscription changes are managed in the Facturino

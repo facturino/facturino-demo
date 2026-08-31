@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	facturino "github.com/facturino/facturino-go"
+	facturino "github.com/facturino/facturino-go/v2"
 )
 
 // StepBootstrap covers phase A of the scenario: confirm the API key, find

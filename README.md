@@ -9,6 +9,17 @@ The shared storyline lives in [`docs/SCENARIO.md`](docs/SCENARIO.md). Read it
 first: every demo follows the same steps, so you can compare stacks line by
 line.
 
+Phase **K** is the one to read if you collect money: it decides the VAT and the
+exact amount to charge **before** anything is collected, carries the decision id
+in the payment reference, verifies the settlement against the decision, then
+issues the invoice from that decision and records the real collection.
+
+Facturino imposes no payment service provider and no payment method. Phase K is
+provider-neutral — a transfer, a direct debit, a cheque, cash, a wallet, an
+external PSP or payment on terms all fit the same flow. Two PSP variants
+(Stripe `metadata`, PayPal `custom_id`) are shown as optional examples, and both
+are simulated locally: no payment service provider is ever contacted.
+
 | # | Stack | Folder | Facturino SDK |
 |---|-------|--------|---------------|
 | 1 | Node.js / TypeScript | [`01-node-sdk`](01-node-sdk) | `@facturino/node` |
@@ -37,16 +48,34 @@ Then follow the README inside the demo you want to run. Each one starts a small
 HTTP server: some routes trigger scenario steps, and `/webhooks` receives
 Facturino events.
 
-> **Installing the SDK.** All four SDKs are published. The manifests resolve
-> them through npm, PyPI, Packagist, or the Go module proxy. Standard install
-> commands (`npm install @facturino/node`, `pip install facturino`, `composer
-> require facturino/facturino-php`, `go get …`) work directly; each stack README
-> documents its pinned range.
+> **Installing the SDK.** The manifests resolve the SDKs through npm, PyPI,
+> Packagist, or the Go module proxy. Standard install commands (`npm install
+> @facturino/node`, `pip install facturino`, `composer require
+> facturino/facturino-php`, `go get …`) work directly; each stack README
+> documents its pinned range. The scenario needs the SDK major that carries
+> the stable tax determination contract: `@facturino/node` 2.0.0, `facturino`
+> (Python) 2.0.0, `facturino/facturino-php` 2.0.0 and
+> `github.com/facturino/facturino-go/v2` v2.0.0.
+>
+> **Lockfiles.** The committed lockfiles (`package-lock.json`, `go.sum`,
+> `composer.lock`) resolve the published 2.0.0 SDKs. A fresh install therefore
+> reproduces the stable tax determination contract demonstrated here without
+> any local SDK checkout or repository override.
 
 ## Amounts and rates
 
 Prices are integer **cents** (`10000` = €100.00). VAT rates are integer
-**hundredths of a percent** (`2000` = 20.00%). No floating point, ever.
+**hundredths of a percent** (`2000` = 20.00%). Quantities travel as decimal
+**strings**. No floating point, ever.
+
+## Scope
+
+Facturino decides **French VAT and the matching French obligations**. It does
+not provide worldwide tax compliance: when a foreign tax may apply, the decision
+says so through `foreignTaxReviewRequired`, and that case must be reviewed
+outside Facturino. An operation whose decided `invoiceChannel` is `none` is not
+deposited on a certified platform — its obligation, if any, goes through
+e-reporting, and the demos never attempt a deposit outside that channel.
 
 ## Layout
 

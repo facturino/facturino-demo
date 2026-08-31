@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	facturino "github.com/facturino/facturino-go"
+	facturino "github.com/facturino/facturino-go/v2"
 )
 
 // StepRecurring covers phase E: the recurring monthly subscription that is
@@ -17,16 +17,32 @@ func (r *Runner) StepRecurring(ctx context.Context) error {
 		return fmt.Errorf("no customer in state; run phase B first")
 	}
 
+	// TaxInputs carries the OPERATION and its fiscal source; each occurrence
+	// is decided on its own generation date. TemplateInvoice carries
+	// presentation and terms only — never a line, never a rate.
 	r.log.Step("recurringInvoices.Create (monthly)")
 	rec, err := r.client.RecurringInvoices.Create(&facturino.RecurringInvoiceParams{
 		CustomerID:         r.state.CustomerID,
 		Frequency:          "monthly",
 		StartDate:          firstOfNextMonth(),
 		NextGenerationDate: firstOfNextMonth(),
+		TaxInputs: &facturino.RecurringTaxInputsParams{
+			TaxSource: "facturino",
+			PriceMode: "tax_exclusive",
+			Lines: []*facturino.RecurringTaxLineParams{{
+				TaxDecisionLineParams: facturino.TaxDecisionLineParams{
+					Reference:    "abo-pro-mensuel",
+					Description:  "Abonnement Atelier Pro (mensuel)",
+					Category:     "electronically_supplied_services",
+					RateCategory: "standard",
+					UnitAmount:   4900,
+					Quantity:     "1",
+				},
+				Unit:    "month",
+				Product: r.state.SubscriptionProductID,
+			}},
+		},
 		TemplateInvoice: &facturino.RecurringTemplateParams{
-			Items: []*facturino.ItemParams{
-				{Description: "Abonnement Atelier Pro (mensuel)", Quantity: "1", Unit: "month", UnitPrice: 4900, VATRate: 2000, VATCode: "S", Product: r.state.SubscriptionProductID},
-			},
 			PaymentMethod:    "transfer",
 			PaymentTermsDays: 30,
 		},
@@ -86,15 +102,17 @@ func (r *Runner) StepCreditNote(ctx context.Context) error {
 		return nil
 	}
 
-	r.log.Step("creditNotes.Create (linked to invoice)")
+	// CreditedLines references the invoice's DECIDED lines: the rate, the
+	// category, the VATEX code and the legal mention are inherited from the
+	// frozen snapshot, never restated. AmountTTC credits a fraction.
+	r.log.Step("creditNotes.Create (creditedLines)")
 	cn, err := r.client.CreditNotes.Create(&facturino.CreditNoteParams{
-		Customer:         r.state.CustomerID,
 		RelatedInvoiceID: r.state.InvoiceID,
 		CreditNoteType:   "partial",
 		ReasonCode:       "other",
 		Reason:           "Geste commercial sur la prestation de mise en place.",
-		Items: []*facturino.ItemParams{
-			{Description: "Remise exceptionnelle", Quantity: "1", Unit: "flat_rate", UnitPrice: 5000, VATRate: 2000, VATCode: "S"},
+		CreditedLines: []*facturino.CreditedLineParams{
+			{TaxLineRef: "mise-en-place", AmountTTC: 6000}, // 50,00 EUR HT + TVA
 		},
 		Dates:          &facturino.CreditNoteDates{Issued: today()},
 		IdempotencyKey: r.idemKey("credit-note"),

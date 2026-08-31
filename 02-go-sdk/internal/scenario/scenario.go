@@ -22,12 +22,12 @@ import (
 	"strings"
 	"time"
 
-	facturino "github.com/facturino/facturino-go"
+	facturino "github.com/facturino/facturino-go/v2"
 )
 
 // Runner carries the SDK client plus the state accumulated as the scenario
 // progresses (the active company, the created customer, the finalized
-// invoice, and so on). A single Runner drives the whole A->J parcours.
+// invoice, and so on). A single Runner drives the whole A->K workflow.
 type Runner struct {
 	client *facturino.Client
 	log    *Logger
@@ -52,12 +52,25 @@ type State struct {
 	OneOffProductID       string `json:"one_off_product_id,omitempty"`
 	CustomerID            string `json:"customer_id,omitempty"`
 	QuoteID               string `json:"quote_id,omitempty"`
-	InvoiceID             string `json:"invoice_id,omitempty"`
-	InvoiceNumber         string `json:"invoice_number,omitempty"`
-	RecurringID           string `json:"recurring_id,omitempty"`
-	CreditNoteID          string `json:"credit_note_id,omitempty"`
-	ReceivedInvoiceID     string `json:"received_invoice_id,omitempty"`
-	WebhookEndpointID     string `json:"webhook_endpoint_id,omitempty"`
+	// ConvertedInvoiceID is the COMMERCIAL draft produced by converting the
+	// quote. Phase D binds the decision to THAT invoice and finalizes it: the
+	// quote lineage is kept and no second document is ever created.
+	ConvertedInvoiceID string `json:"converted_invoice_id,omitempty"`
+	// ConvertedDraft is that draft's commercial block, read back from the
+	// conversion: its line references are server-assigned, and the decision
+	// must state exactly the operation they describe.
+	ConvertedDraft    *facturino.CommercialDraft `json:"converted_draft,omitempty"`
+	ConvertedIssuedOn string                     `json:"converted_issued_on,omitempty"`
+	InvoiceID         string                     `json:"invoice_id,omitempty"`
+	InvoiceNumber     string                     `json:"invoice_number,omitempty"`
+	RecurringID       string                     `json:"recurring_id,omitempty"`
+	CreditNoteID      string                     `json:"credit_note_id,omitempty"`
+	ReceivedInvoiceID string                     `json:"received_invoice_id,omitempty"`
+	WebhookEndpointID string                     `json:"webhook_endpoint_id,omitempty"`
+	TaxDecisionID     string                     `json:"tax_decision_id,omitempty"`
+	DecidedInvoiceID  string                     `json:"decided_invoice_id,omitempty"`
+	DepositInvoiceID  string                     `json:"deposit_invoice_id,omitempty"`
+	MainDecisionID    string                     `json:"main_decision_id,omitempty"`
 }
 
 // NewRunner builds a scenario runner. seed is mixed into idempotency keys;
@@ -73,6 +86,38 @@ func NewRunner(client *facturino.Client, log *Logger, seed string, webhookURL st
 
 // Snapshot returns a copy of the current accumulated state.
 func (r *Runner) Snapshot() State { return r.state }
+
+// decide takes a `facturino`-source decision on the given commercial lines.
+// It returns nil (after logging what is missing) unless the decision is
+// final: `pending_verification` means "cannot conclude yet", never "0".
+func (r *Runner) decide(lines []*facturino.TaxDecisionLineParams, keySuffix string) (*facturino.TaxDecision, error) {
+	return r.decideOn(lines, keySuffix, today())
+}
+
+// decideOn takes the decision for a stated EFFECT DATE. When the decision
+// fiscalises an EXISTING draft it must be that draft's issue date: a decision
+// dated elsewhere describes another operation and is refused at binding.
+func (r *Runner) decideOn(lines []*facturino.TaxDecisionLineParams, keySuffix, effectiveAt string) (*facturino.TaxDecision, error) {
+	decision, err := r.client.TaxDecisions.Create(&facturino.TaxDecisionParams{
+		TaxSource:      "facturino",
+		Customer:       r.state.CustomerID,
+		EffectiveAt:    effectiveAt,
+		Currency:       "eur",
+		PriceMode:      "tax_exclusive",
+		Lines:          lines,
+		IdempotencyKey: r.idemKey(keySuffix),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("taxDecisions.Create (%s): %w", keySuffix, err)
+	}
+	if !decision.IsFinal() || decision.AmountToCharge == nil {
+		for _, issue := range decision.Issues {
+			r.log.Warnf("missing: %s — %s", issue.Code, issue.Message)
+		}
+		return nil, nil
+	}
+	return decision, nil
+}
 
 // idemKey derives a deterministic Idempotency-Key for a logical operation.
 // The same (seed, op) pair always yields the same key, so a retried request
@@ -155,7 +200,7 @@ func (r *Runner) pollExport(ctx context.Context, label string, status func() (st
 	return nil
 }
 
-// RunAll executes the entire A->J parcours in order, stopping at the first
+// RunAll executes the entire A->K workflow in order, stopping at the first
 // hard failure. Non-fatal, plan-gated or environment-dependent operations
 // are reported as skips and do not abort the run (see runStep).
 func (r *Runner) RunAll(ctx context.Context) error {
@@ -168,6 +213,11 @@ func (r *Runner) RunAll(ctx context.Context) error {
 		{"C. Quote -> invoice", r.StepQuoteToInvoice},
 		{"D. Invoice lifecycle", r.StepInvoiceLifecycle},
 		{"E. Recurring subscription", r.StepRecurring},
+		{"K. Decision-first billing", r.StepTaxDecision},
+		{"K. Deposit and payment schedule", r.StepDepositAndSchedule},
+		{"K. Credit note on a decided invoice", r.StepDecidedCreditNote},
+		{"K. Recurrence on the decided journey", r.StepDecidedRecurring},
+		{"K. VAT supplied by the integration", r.StepIntegrationDecision},
 		{"F. Credit note", r.StepCreditNote},
 		{"G. Received (purchase) invoices", r.StepReceivedInvoices},
 		{"H. Webhooks", r.StepWebhooks},
@@ -187,7 +237,7 @@ func (r *Runner) RunAll(ctx context.Context) error {
 
 // runStep is a small helper for optional sub-operations: it logs the call,
 // runs fn, and converts plan-gated / not-found / unsupported outcomes into a
-// "skipped" log line instead of a fatal error. This keeps the parcours
+// "skipped" log line instead of a fatal error. This keeps the workflow
 // runnable on any plan while still exercising the call path.
 func (r *Runner) runStep(label string, fn func() error) {
 	r.log.Step(label)

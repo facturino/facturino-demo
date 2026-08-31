@@ -18,7 +18,7 @@ import { randomUUID } from 'node:crypto';
 import type { Config } from './config.js';
 
 /** API version pinned by the demo. Sent on every request for forward-compat. */
-const API_VERSION = '2026-03-01';
+const API_VERSION = '2026-09-01';
 
 /** Default network timeout per attempt (ms). The API itself returns < 60s. */
 const REQUEST_TIMEOUT_MS = 30_000;

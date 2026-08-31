@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	facturino "github.com/facturino/facturino-go"
+	facturino "github.com/facturino/facturino-go/v2"
 )
 
 // StepWebhooks covers phase H (the registration half): create the webhook

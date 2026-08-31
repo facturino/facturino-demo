@@ -5,9 +5,9 @@ A small B2B SaaS backend that bills end to end through the
 [`facturino/facturino-php`](https://github.com/facturino/facturino-php) SDK.
 
 It runs the shared scenario from [`../docs/SCENARIO.md`](../docs/SCENARIO.md)
-(steps A→J): bootstrap, catalog & customer, quote→invoice, the full invoice
+(steps A→K): bootstrap, catalog & customer, quote→invoice, the full invoice
 lifecycle, a recurring subscription, a credit note, received invoices,
-webhooks, accounting/reporting and account administration.
+webhooks, accounting/reporting, account administration and decision-first billing.
 
 No framework: a single front controller (`public/index.php`) on PHP's built-in
 web server. The only runtime dependency is the SDK.
@@ -30,7 +30,7 @@ composer install
 To add or refresh the dependency explicitly:
 
 ```bash
-composer require facturino/facturino-php:^1.0
+composer require facturino/facturino-php:^2.0
 ```
 
 ## Configure
@@ -69,11 +69,12 @@ php -d max_execution_time=0 -S localhost:4242 -t public public/index.php
 Then drive the scenario:
 
 ```bash
-# Whole journey A -> J
+# Whole journey A -> K
 curl -s -X POST localhost:4242/run | jq
 
-# A single phase (a..j)
+# A single phase (a..k)
 curl -s -X POST localhost:4242/run/d | jq      # invoice lifecycle
+curl -s -X POST localhost:4242/run/k | jq      # decision-first billing
 
 # Fix the idempotency run id (stable retries)
 curl -s -X POST 'localhost:4242/run?run_id=2026-05-31-demo' | jq
@@ -93,8 +94,8 @@ php public/index.php j        # account & billing (read-only)
 |---|---|---|
 | `GET` | `/` | Index: available routes & options |
 | `GET` | `/health` | Liveness probe |
-| `POST` | `/run` | Full journey A→J |
-| `POST` | `/run/{a..j}` | One phase (prerequisites replayed automatically) |
+| `POST` | `/run` | Full journey A→K |
+| `POST` | `/run/{a..k}` | One phase (prerequisites replayed automatically) |
 | `POST` | `/webhooks` | Inbound Facturino webhooks (signature verified) |
 
 ### Webhooks
@@ -167,7 +168,7 @@ listed in `docs/SCENARIO.md`.
 | **C7c2** | Clone (re-propose as draft) | `Quote::clone()` |
 | **C7d** | Convert to invoice | `Quote::convert()` |
 | **C8** | Upstream validation | `Validate::run()` (EN16931) |
-| **D9** | Create invoice | `Invoice::create()` (BG-7, BT-13) |
+| **D9** | Decide, then create from the decision | `TaxDecision::create()`, `Invoice::create()` (`taxDecisionId` + `decisionLines`, BG-7, BT-13) |
 | **D9b** | Finalize (+ list filter `convertedFrom`) | `Invoice::finalize/retrieve/getStatus/all()` |
 | **D10** | Documents | `Invoice::getPdf/getFacturx/getXml()`, `Job::retrieve()` |
 | **D11** | Deposit to PA | `Invoice::send()` |
@@ -178,10 +179,10 @@ listed in `docs/SCENARIO.md`.
 | **D13** | Reminder/events | `Invoice::remind()`, `Invoice::listEvents()` |
 | **D14** | Audit trail | `Invoice::verify/getAuditTrail/generateAuditTrailPdf()` |
 | **D15** | Clone | `Invoice::clone()` |
-| **E16** | Recurring | `RecurringInvoice::create()` |
+| **E16** | Recurring (`taxInputs` + its `taxSource`) | `RecurringInvoice::create()` |
 | **E16b** | Recurring read/list | `RecurringInvoice::retrieve/update/all()` |
 | **E16c** | Pause/resume | `RecurringInvoice::pause/resume()` |
-| **F17** | Credit note | `CreditNote::create()` |
+| **F17** | Credit note (`creditedLines`, inherited VAT) | `CreditNote::create()` |
 | **F17b** | Finalize/send/docs | `CreditNote::finalize/send/getPdf/getFacturx()` |
 | **F17c** | Invoice + linked credit notes | `Invoice::retrieve(id, ['expand' => 'credit_notes'])` (`net_balance`) |
 | **G18** | Incoming invoice | `Invoice::createIncoming()`, `Invoice::listIncoming()` |
@@ -195,3 +196,8 @@ listed in `docs/SCENARIO.md`.
 | **I25** | Archives | `\Facturino\Resource\Archive::all/retrieve()` |
 | **J29** | Facturino billing (read-only) | `Billing::retrieveSubscription/listInvoices/getInvoicePdf()` |
 | **J30** | RGPD | `Account::requestExport/downloadExport()` |
+| **K1-K6** | Decision-first billing | `TaxDecision::create/retrieve()`, `Invoice::create()` (`taxDecisionId` + `decisionLines`), `Invoice::finalize/send()` |
+| **K7-K8** | Deposit decided + settled, then deducted | `TaxDecision::create()`, `Invoice::create()` (`type => 'deposit'`), `Invoice::finalize()`, `Payment::create()`, `Invoice::create()` (`deposits` + `schedule`, settled against the decided amount) |
+| **K9** | Credit note on a decided invoice | `CreditNote::create()` (`creditedLines`) |
+| **K10** | Recurrence on the decided journey | `RecurringInvoice::create()` (`taxInputs`) |
+| **K11** | VAT supplied by the integration (`taxSource => 'integration'`) | `TaxDecision::create()` (supplied `vatRate`/`vatCode`/`vatexCode`), `Invoice::create()`, refusal `integration_vat_incoherent` |

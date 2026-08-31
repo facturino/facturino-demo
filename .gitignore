@@ -16,7 +16,11 @@ venv/
 
 # PHP
 vendor/
-composer.lock
+# composer.lock is COMMITTED on purpose: these demos are applications, not
+# libraries. Composer's own guidance is to commit the lock for a project so
+# every run installs the exact same dependency versions; a library omits it to
+# let its consumers resolve. Same reason 01/05 commit package-lock.json and 02
+# commits go.sum.
 
 # Go
 *.exe

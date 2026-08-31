@@ -9,7 +9,7 @@ import { handleWebhook } from './webhook.js'
  * Minimal HTTP server (node:http, no framework) exposing:
  *
  *   GET  /                — health + route index
- *   POST /run             — the full A→J scenario
+ *   POST /run             — the full A→K scenario
  *   POST /run/:phase      — a single phase (bootstrap, catalogue, customer, …)
  *   POST /webhooks        — inbound Facturino events (signature-verified)
  */
@@ -31,6 +31,7 @@ const PHASES = [
   'invoice',
   'recurring',
   'creditNote',
+  'taxDecision',
   'purchases',
   'webhooks',
   'accounting',
@@ -78,6 +79,14 @@ async function runPhase(phase: Phase): Promise<void> {
     case 'recurring':
       await scenario.recurring(customer, subscription)
       return
+    case 'taxDecision':
+      // Decision-first billing runs on its own: it decides, charges the decided
+      // amount, verifies the capture and issues the invoice from the decision.
+      const decidedInvoice = await scenario.taxDecision(customer, subscription)
+      await scenario.depositAndSchedule(customer, service)
+      if (decidedInvoice) await scenario.decidedCreditNote(decidedInvoice)
+      await scenario.decidedRecurring(customer, subscription)
+      return
     case 'administration':
       await scenario.administration(account, company)
       return
@@ -85,7 +94,7 @@ async function runPhase(phase: Phase): Promise<void> {
 
   // invoice / creditNote / purchases need a finalized invoice.
   const { draft, quoteId } = await scenario.quoteToInvoice(customer, service)
-  const invoice = await scenario.invoiceLifecycle(company, customer, subscription, draft, quoteId)
+  const invoice = await scenario.invoiceLifecycle(company, customer, draft, quoteId)
 
   switch (phase) {
     case 'invoice':
@@ -117,7 +126,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       service: 'facturino-demo-node-sdk',
       baseUrl: config.baseUrl,
       routes: {
-        'POST /run': 'full A→J scenario',
+        'POST /run': 'full A→K scenario',
         'POST /run/:phase': `one phase (${PHASES.join(', ')})`,
         'POST /webhooks': 'inbound Facturino events (signature-verified)',
       },

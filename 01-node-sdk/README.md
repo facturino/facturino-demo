@@ -2,7 +2,7 @@
 
 "Atelier Dupont", a French B2B SaaS that bills **100% through Facturino**, from
 the first quote to the accounting export. This demo runs the shared scenario
-(see [`../docs/SCENARIO.md`](../docs/SCENARIO.md), steps A→J) using the official
+(see [`../docs/SCENARIO.md`](../docs/SCENARIO.md), steps A→K) using the official
 [`@facturino/node`](https://github.com/facturino/facturino-node) SDK.
 
 It is a small executable backend: an HTTP server whose routes trigger scenario
@@ -21,7 +21,7 @@ The SDK comes from the npm registry (see `package.json`):
 
 ```jsonc
 "dependencies": {
-  "@facturino/node": "^1.0.0"
+  "@facturino/node": "^2.0.0"
 }
 ```
 
@@ -58,14 +58,14 @@ node --env-file=.env --watch --experimental-strip-types src/server.ts
 Then drive the scenario over HTTP:
 
 ```bash
-curl -X POST http://localhost:4242/run                # full A→J scenario
+curl -X POST http://localhost:4242/run                # full A→K scenario
 curl -X POST http://localhost:4242/run/bootstrap      # a single phase
 curl http://localhost:4242/                           # route index
 ```
 
 Phase routes: `bootstrap`, `catalogue`, `customer`, `quote`, `validate`,
 `invoice`, `recurring`, `creditNote`, `purchases`, `webhooks`, `accounting`,
-`administration`. Phases that depend on earlier resources
+`administration`, `taxDecision`. Phases that depend on earlier resources
 rebuild their (idempotent) prerequisites first, so any phase runs standalone.
 
 ### Webhooks
@@ -101,7 +101,7 @@ rebuild their (idempotent) prerequisites first, so any phase runs standalone.
 |------|------|
 | `src/config.ts` | Reads the environment; constructs the `Facturino` client. |
 | `src/lib.ts` | Idempotency keys, error formatting, date helpers, logging. |
-| `src/scenario.ts` | The A→J scenario, one method per phase. |
+| `src/scenario.ts` | The A→K scenario, one method per phase. |
 | `src/webhook.ts` | `/webhooks` handler — signature verification + dispatch. |
 | `src/server.ts` | HTTP server wiring routes to phases. |
 
@@ -115,16 +115,16 @@ rebuild their (idempotent) prerequisites first, so any phase runs standalone.
 | **B.5** | Products (subscription + service), CSV | `products.create`, `products.get`, `products.update`, `products.list` (filters `q`, `category`, `active`), `products.exportCsv` |
 | **B.6** | Customer (SIRENE lookup, lookup-or-create, `billing` contact) | `customers.lookup`, `customers.list`, `customers.create` (`contacts: [{ role: 'billing' }]`), `customers.get`, `customers.update` |
 | **C.7** | Quote → invoice | `quotes.create`, `quotes.send`, `quotes.get`, `quotes.accept`, `quotes.getPdf`, `quotes.getSignatureProof`, `quotes.clone`, `quotes.convert` |
-| **C.8** | Upstream EN16931 validation (invoice dry-run) | `validate.run` (invoice payload) |
-| **D.9** | Create + finalize + trace from quote | `invoices.create`, `invoices.finalize`, `invoices.get`, `invoices.getStatus`, `invoices.list` (filter `convertedFrom`) |
+| **C.8** | Upstream EN16931 validation (decision-backed dry-run) | `taxDecisions.create`, `validate.run` |
+| **D.9** | Decide, create from the decision, finalize, trace from quote | `taxDecisions.create`, `invoices.create` (`taxDecisionId` + `decisionLines`), `invoices.finalize`, `invoices.get`, `invoices.getStatus`, `invoices.list` (filter `convertedFrom`) |
 | **D.10** | Documents (PDF, Factur-X, CII+UBL) | `invoices.getPdf`, `invoices.getFacturx`, `invoices.getXml`, `jobs.poll` |
 | **D.11** | Deposit to PA (+ deterministic status chain) | `invoices.send`, `sandbox.simulateStatus` |
 | **D.12** | Collection | `invoices.createPaymentLink`, `invoices.createPortalLink`, `invoices.payments.create`, `invoices.payments.list` |
 | **D.13** | Reminder + lifecycle | `invoices.remind`, `invoices.listEvents` |
 | **D.14** | Audit trail | `invoices.verify`, `invoices.getAuditTrail`, `invoices.generateAuditTrailPdf` |
 | **D.15** | Clone | `invoices.clone`, `invoices.del` |
-| **E.16** | Recurring subscription | `recurringInvoices.create`, `recurringInvoices.get`, `recurringInvoices.update`, `recurringInvoices.pause`, `recurringInvoices.resume`, `recurringInvoices.list` |
-| **F.17** | Credit note (+ invoice with credit notes expanded) | `creditNotes.create`, `creditNotes.finalize`, `creditNotes.send`, `creditNotes.getPdf`, `creditNotes.getFacturx`, `invoices.get` (`expand: ['credit_notes']` → `expanded.credit_notes`, `expanded.net_balance`) |
+| **E.16** | Recurring subscription (`taxInputs` + its `taxSource`) | `recurringInvoices.create`, `recurringInvoices.get`, `recurringInvoices.update`, `recurringInvoices.pause`, `recurringInvoices.resume`, `recurringInvoices.list` |
+| **F.17** | Credit note (`creditedLines`, inherited VAT) | `creditNotes.create`, `creditNotes.finalize`, `creditNotes.send`, `creditNotes.getPdf`, `creditNotes.getFacturx`, `invoices.get` (`expand: ['credit_notes']` → `expanded.credit_notes`, `expanded.net_balance`) |
 | **G.18** | Purchases / received invoices | `invoices.createIncoming`, `invoices.listIncoming`, `receivedInvoices.list`, `receivedInvoices.get`, `receivedInvoices.approve`, `receivedInvoices.recordPayment` (`refuse`/`suspend` coded) |
 | **H.19** | Register + test webhook endpoint | `webhookEndpoints.list`, `webhookEndpoints.create`, `webhookEndpoints.test` |
 | **H.20** | Receive + verify events | `webhooks.constructEvent` (in `src/webhook.ts`) |
@@ -135,6 +135,11 @@ rebuild their (idempotent) prerequisites first, so any phase runs standalone.
 | **I.25** | Archives | `archives.list`, `archives.get` |
 | **J.29** | Facturino billing (read-only) | `billing.retrieveSubscription`, `billing.listInvoices`, `billing.getInvoicePdf` |
 | **J.30** | RGPD | `account.requestExport`, `account.downloadExport` |
+| **K.29-38** | Decision-first billing | `taxDecisions.create`, `taxDecisions.retrieve`, `invoices.create` (`taxDecisionId` + `decisionLines`), `invoices.finalize`, `invoices.send` |
+| **K.11b** | Deposit decided + settled, then deducted | `taxDecisions.create`, `invoices.create` (`type: 'deposit'`), `invoices.finalize`, `invoices.payments.create`, `invoices.create` (`deposits` + `schedule`, settled against the decided amount) |
+| **K.12** | Credit note on a decided invoice | `creditNotes.create` (`creditedLines`) |
+| **K.13** | Recurrence on the decided journey | `recurringInvoices.create` (`taxInputs`) |
+| **K.14** | VAT supplied by the integration (`taxSource: 'integration'`) | `taxDecisions.create` (supplied `vatRate`/`vatCode`/`vatexCode`), `invoices.create`, refusal `integration_vat_incoherent` |
 
 > API keys, team members and subscription changes are managed in the Facturino
 > web app, not over the developer API, so they are not part of the SDK.

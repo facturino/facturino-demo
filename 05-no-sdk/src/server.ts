@@ -3,7 +3,7 @@
  *
  * Two responsibilities:
  *   1. Trigger the scenario on demand:
- *        POST /run            → the full A→J parcours
+ *        POST /run            → the full A→K workflow
  *   2. Receive Facturino webhooks:
  *        POST /webhooks       → verify signature BY HAND, then process events
  *
@@ -167,9 +167,9 @@ server.listen(config.port, () => {
   console.log(`  Live mode  : ${config.livemode}`);
   console.log(`  Public URL : ${config.publicBaseUrl || '(unset — webhooks unreachable from Facturino)'}`);
   console.log('');
-  console.log('  POST /run            run the full A→J scenario');
+  console.log('  POST /run            run the full A→K scenario');
   console.log('  POST /webhooks       receive + verify Facturino webhooks');
   console.log('  GET  /health         liveness + config sanity check');
   console.log('');
-  console.log('  Tip: trigger the parcours with  curl -XPOST http://localhost:' + config.port + '/run');
+  console.log('  Tip: trigger the workflow with  curl -XPOST http://localhost:' + config.port + '/run');
 });

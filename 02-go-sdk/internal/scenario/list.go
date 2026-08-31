@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	facturino "github.com/facturino/facturino-go"
+	facturino "github.com/facturino/facturino-go/v2"
 )
 
 // unmarshalFirst decodes the first element of a *facturino.ListResponse

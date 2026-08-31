@@ -11,7 +11,7 @@ import (
 	"os"
 	"strings"
 
-	facturino "github.com/facturino/facturino-go"
+	facturino "github.com/facturino/facturino-go/v2"
 )
 
 // Config holds the resolved settings the demo needs to run.

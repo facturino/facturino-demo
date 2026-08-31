@@ -16,6 +16,7 @@ use Facturino\Export;
 use Facturino\Invoice;
 use Facturino\Job;
 use Facturino\Payment;
+use Facturino\TaxDecision;
 use Facturino\Product;
 use Facturino\Quote;
 use Facturino\ReceivedInvoice;
@@ -67,7 +68,7 @@ final class Scenario
     }
 
     /**
-     * Joue l'integralite du parcours A -> J dans l'ordre.
+     * Run the complete A -> K workflow in order.
      *
      * @return array<string, mixed> Resultat structure (runId + journal).
      */
@@ -78,6 +79,11 @@ final class Scenario
         $this->quoteToInvoice();        // C
         $this->invoiceLifecycle();      // D
         $this->recurring();             // E
+        $this->taxDecision();           // K
+        $this->depositAndSchedule();    // K
+        $this->decidedCreditNote();     // K
+        $this->decidedRecurring();      // K
+        $this->integrationDecision();   // K
         $this->creditNote();            // F
         $this->purchases();             // G
         $this->webhooksSetup();         // H
@@ -360,19 +366,33 @@ final class Scenario
             return ['clonedQuoteId' => $cloned['id'] ?? null, 'status' => $cloned['status'] ?? null];
         });
 
-        $this->step('C7d', 'quotes.convert — devis accepte -> facture brouillon', function (): array {
+        $this->step('C7d', 'quotes.convert — devis accepte -> brouillon commercial', function (): array {
             $invoice = Quote::convert($this->state['quoteId']);
-            // La facture issue de la conversion sert de base au cycle D.
+            // Le brouillon converti EST la facture du cycle D : sa TVA n'est pas
+            // encore decidee (taxSource null). D9 decide cette meme operation,
+            // adosse la decision a CE document, puis le finalise.
+            $draft = $invoice['commercialDraft'] ?? null;
+            if (!is_array($draft) || ($draft['lines'] ?? []) === []) {
+                throw new \RuntimeException('quotes.convert a rendu un brouillon sans operation commerciale');
+            }
             $this->state['convertedInvoiceId'] = $invoice['id'] ?? null;
+            $this->state['convertedDraft'] = $draft;
+            // La decision doit prendre effet a la date d'emission DU BROUILLON.
+            $this->state['convertedIssuedOn'] = $invoice['dates']['issued'] ?? null;
 
             return ['invoiceId' => $invoice['id'] ?? null, 'status' => $invoice['status'] ?? null];
         });
 
-        // C8 — Validation amont EN16931 sans rien emettre.
-        $this->step('C8', 'validate.run — controle EN16931 du payload', function (): array {
-            // POST /v1/validate accepte le meme corps qu'invoices.create et
-            // renvoie {valid, warnings} sans rien persister (dry-run CIUS-FR).
-            $validation = Validate::run($this->invoicePayload());
+        // C8 — Validation amont EN16931 sans rien emettre. Meme le dry-run est
+        // decision-first : la decision est prise d'abord ; la validation ne
+        // persiste rien et ne consomme pas la decision, que D9 reutilise.
+        $this->step('C8', 'taxDecisions.create + validate.run — controle EN16931', function (): array {
+            $decision = $this->decide($this->mainOperationLines(), 'C8-main-decision');
+            if ($decision === null) {
+                return ['skipped' => true, 'reason' => 'the decision is not final'];
+            }
+            $this->state['mainDecisionId'] = $decision['id'];
+            $validation = Validate::run($this->invoicePayloadFromDecision($decision['id']));
 
             return [
                 'valid' => $validation['valid'] ?? ($validation['ok'] ?? null),
@@ -387,12 +407,36 @@ final class Scenario
 
     public function invoiceLifecycle(): void
     {
-        // D9 — Creer une facture (buyer BG-7, lignes, payment, BT-13).
-        $this->step('D9', 'invoices.create — brouillon complet', function (): array {
-            $invoice = Invoice::create($this->invoicePayload(), $this->idem->key('D9-invoice'));
+        // D9 — La facture est celle que le DEVIS a produite. Son bloc commercial
+        // est relu depuis la conversion : les references de ligne sont
+        // attribuees cote serveur, et la decision doit enoncer exactement
+        // l'operation portee par le brouillon. La decision est ensuite ADOSSEE a
+        // ce meme document : en creer un second laisserait le brouillon converti
+        // orphelin et romprait la filiation devis -> facture.
+        $this->step('D9', 'taxDecisions.create + invoices.bindTaxDecision — brouillon converti', function (): array {
+            $convertedId = $this->state['convertedInvoiceId'] ?? null;
+            $draft = $this->state['convertedDraft'] ?? null;
+            $issuedOn = $this->state['convertedIssuedOn'] ?? null;
+            if (!is_string($convertedId) || !is_array($draft) || !is_string($issuedOn)) {
+                throw new \RuntimeException('aucun brouillon converti : le cycle devis ne peut pas se poursuivre');
+            }
+
+            $decision = $this->decide($this->decisionLinesFromDraft($draft), 'D9-converted-decision', $issuedOn);
+            if ($decision === null) {
+                throw new \RuntimeException(sprintf(
+                    "l'operation du brouillon %s n'est pas decidable : aucune facture n'est emise",
+                    $convertedId
+                ));
+            }
+            $this->state['mainDecisionId'] = $decision['id'];
+
+            $invoice = Invoice::bindTaxDecision($convertedId, [
+                'taxDecisionId' => $decision['id'],
+                'decisionLines' => $this->presentationFromDraft($draft),
+            ], $this->idem->key('D9-bind-decision'));
             $this->state['invoiceId'] = $invoice['id'];
 
-            return ['invoiceId' => $invoice['id'], 'status' => $invoice['status'] ?? null];
+            return ['invoiceId' => $invoice['id'], 'status' => $invoice['status'] ?? null, 'taxSource' => $invoice['taxSource'] ?? null];
         });
 
         // D9b — Finaliser (numerotation atomique, irreversible).
@@ -547,25 +591,467 @@ final class Scenario
     // E. Abonnement recurrent (coeur SaaS)
     // -----------------------------------------------------------------
 
-    public function recurring(): void
+    // -----------------------------------------------------------------
+    // K. Decision-first billing
+    // -----------------------------------------------------------------
+
+    /**
+     * Decide, collect the decided amount, verify after settlement, then invoice.
+     *
+     * The order is the point. The VAT and the exact amount to debit come from
+     * Facturino BEFORE anything is collected, and the decision id travels with
+     * the settlement so what was received can be checked against what was
+     * decided.
+     *
+     * Facturino imposes no payment service provider and no payment method. The
+     * flow below is provider-neutral: the decision id is carried in the payment
+     * REFERENCE, which every settlement has — a transfer, a direct debit, a
+     * cheque, cash, or a PSP capture. Two PSP variants are shown afterwards as
+     * examples; both are simulated locally, and no PSP is ever contacted.
+     */
+    public function taxDecision(): void
     {
-        $this->step('E16', 'recurringInvoices.create — abonnement mensuel', function (): array {
+        $this->step('K1', 'taxDecisions.create — decide before charging', function (): array {
+            $decision = TaxDecision::create([
+                // Facturino determines the VAT; 'integration' is the other
+                // journey, shown in integrationDecision() below.
+                'taxSource' => 'facturino',
+                'customerId' => $this->customerId(),
+                // The effective date drives the applicable rules, not the clock.
+                'effectiveAt' => gmdate('Y-m-d'),
+                'currency' => 'eur',
+                'priceMode' => 'tax_exclusive',
+                'lines' => [[
+                    'reference' => 'abo-pro',
+                    'description' => 'Abonnement Atelier Dupont — Studio',
+                    // A subscription delivered online is an electronically
+                    // supplied service: it carries its own place-of-supply rules.
+                    'category' => 'electronically_supplied_services',
+                    'rateCategory' => 'standard',
+                    'unitAmount' => 9900, // integer cents
+                    'quantity' => '1',    // decimal STRING, never a float
+                ]],
+            ], $this->idem->key('K1-tax-decision'));
+
+            $this->state['taxDecisionId'] = $decision['id'];
+            $this->state['taxDecisionStatus'] = $decision['status'];
+
+            return ['taxDecisionId' => $decision['id'], 'status' => $decision['status']];
+        });
+
+        // Stop immediately unless the decision is final. "pending_verification"
+        // does not mean "nothing to charge": the amounts are null, not 0.
+        if (($this->state['taxDecisionStatus'] ?? null) !== 'final') {
+            $this->step('K2', 'decision is not final — nothing charged, no invoice', fn (): array => [
+                'status' => $this->state['taxDecisionStatus'] ?? null,
+            ]);
+
+            return;
+        }
+
+        $this->step('K3', 'settlement (simulated) — collect exactly the decided amount', function (): array {
+            $decision = TaxDecision::retrieve($this->state['taxDecisionId']);
+            $amount = $decision['amountToCharge'];
+
+            // Every settlement has a reference: a transfer wording, a
+            // direct-debit mandate reference, a cheque number, a PSP charge id.
+            // That reference is what lets K4 verify what was actually received.
+            $this->state['settledAmount'] = $amount;
+            $this->state['settledCurrency'] = $decision['currency'];
+            $this->state['settledCustomerId'] = $decision['customerId'];
+            $this->state['settlementReference'] = $decision['id'];
+            // transfer, card, check, cash, direct_debit, sepa, paypal or other
+            $this->state['settlementMethod'] = 'transfer';
+
+            return [
+                'amount_cents' => $amount,
+                'currency' => $decision['currency'],
+                'method' => $this->state['settlementMethod'],
+                'reference' => $this->state['settlementReference'],
+                // OPTIONAL, for a PSP-collected payment. Two examples, nothing
+                // more: Facturino requires neither, and nothing is sent here.
+                'optional_psp_variants' => [
+                    'stripe_metadata' => ['facturino_tax_decision_id' => $decision['id']],
+                    'paypal_custom_id' => $decision['id'],
+                    // PayPal reasons in decimal units, so convert from cents.
+                    'paypal_value' => number_format($amount / 100, 2, '.', ''),
+                ],
+            ];
+        });
+
+        $this->step('K4', 'taxDecisions.retrieve — verify the settlement', function (): array {
+            // Read the decision back from the reference carried with the payment.
+            $source = TaxDecision::retrieve($this->state['settlementReference']);
+
+            // Amount, currency and buyer must match, or the settlement and the
+            // invoice would not describe the same operation.
+            if (($this->state['settledAmount'] ?? null) !== $source['amountToCharge']) {
+                throw new \RuntimeException('settled amount differs from the decision');
+            }
+            if (($this->state['settledCurrency'] ?? null) !== $source['currency']) {
+                throw new \RuntimeException('settled currency differs from the decision');
+            }
+            if (($this->state['settledCustomerId'] ?? null) !== $source['customerId']) {
+                throw new \RuntimeException('settled buyer differs from the decision');
+            }
+            $this->state['decidedAmount'] = $source['amountToCharge'];
+
+            return [
+                'amountToCharge' => $source['amountToCharge'],
+                'currency' => $source['currency'],
+                'invoiceChannel' => $source['invoiceChannel'] ?? null,
+                'transactionReporting' => $source['transactionReporting'] ?? null,
+                'paymentReporting' => $source['paymentReporting'] ?? null,
+                'foreignTaxReviewRequired' => $source['foreignTaxReviewRequired'] ?? null,
+            ];
+        });
+
+        $this->step('K5', 'invoices.create — backed by the decision', function (): array {
+            $source = TaxDecision::retrieve($this->state['taxDecisionId']);
+
+            // No VAT is restated: a decided line is referenced, and the document
+            // line carries presentation only.
+            $invoice = Invoice::create([
+                'customerId' => $source['customerId'],
+                'taxDecisionId' => $source['id'],
+                'decisionLines' => [['taxLineRef' => 'abo-pro', 'unit' => 'month']],
+                'buyer' => $this->buyerBlock(),
+                'dates' => ['issued' => gmdate('Y-m-d'), 'due' => gmdate('Y-m-d', strtotime('+30 days'))],
+                'payment' => $this->paymentTerms(),
+            ], $this->idem->key('K5-decided-invoice'));
+
+            $finalized = Invoice::finalize($invoice['id']);
+            $this->state['decidedInvoiceId'] = $finalized['id'];
+
+            return [
+                'invoiceId' => $finalized['id'],
+                'number' => $finalized['number'] ?? null,
+                'taxSource' => $finalized['taxSource'] ?? null,
+                // The three status axes, read off the finalized invoice.
+                'documentStatus' => $finalized['documentStatus'] ?? null,
+                'transmissionStatus' => $finalized['transmissionStatus'] ?? null,
+                'paymentStatus' => $finalized['paymentStatus'] ?? null,
+            ];
+        });
+
+        $this->step('K6', 'invoices.send — only on the decided channel', function (): array {
+            $source = TaxDecision::retrieve($this->state['taxDecisionId']);
+            if (($source['invoiceChannel'] ?? null) !== 'einvoicing') {
+                // Not a failure: the operation is simply outside the e-invoicing
+                // channel. Calling invoices.send here would be refused.
+                return [
+                    'sent' => false,
+                    'invoiceChannel' => $source['invoiceChannel'] ?? null,
+                    'note' => 'the obligation, if any, goes through e-reporting',
+                ];
+            }
+
+            Invoice::send($this->state['decidedInvoiceId']);
+
+            return ['sent' => true, 'invoiceChannel' => 'einvoicing'];
+        });
+
+        // The REAL collection, with its real date, its real method and the
+        // reference that carries the decision id. The payment axis moves; the
+        // transmission axis does not.
+        $this->step('K6b', 'payments.create — record the real collection', function (): array {
+            Payment::create($this->state['decidedInvoiceId'], [
+                'amount' => $this->state['settledAmount'],
+                'method' => $this->state['settlementMethod'],
+                'reference' => $this->state['settlementReference'],
+                'paidAt' => gmdate('Y-m-d'),
+            ], $this->idem->key('K6b-decided-payment'));
+
+            $settled = Invoice::retrieve($this->state['decidedInvoiceId']);
+
+            return [
+                'reference' => $this->state['settlementReference'],
+                'documentStatus' => $settled['documentStatus'] ?? null,
+                'transmissionStatus' => $settled['transmissionStatus'] ?? null,
+                'paymentStatus' => $settled['paymentStatus'] ?? null,
+            ];
+        });
+    }
+
+    /**
+     * Deposit invoice (386), settled, then deducted from the balance invoice.
+     *
+     * The order matters and is the point: a deposit is deducted as PREPAID
+     * (BT-113), and an amount is only prepaid once it has actually been
+     * collected. The deposit is therefore created, finalized, and its payment
+     * recorded IN FULL before it is attached to the balance invoice. A deposit
+     * that is merely finalized has been invoiced, not paid.
+     */
+    public function depositAndSchedule(): void
+    {
+        $this->step('K7', 'taxDecisions.create + invoices.create (386) + full payment', function (): array {
+            // A `deposit` line names the principal supply it follows.
+            $depositDecision = $this->decide([[
+                'reference' => 'acompte-prestation',
+                'description' => 'Prestation — acompte',
+                'category' => 'deposit',
+                'relatedCategory' => 'services',
+                'rateCategory' => 'standard',
+                'unitAmount' => 24000,
+                'quantity' => '1',
+            ]], 'K7-deposit-decision');
+            if ($depositDecision === null) {
+                return ['skipped' => true, 'reason' => 'the deposit decision is not final'];
+            }
+            $this->state['depositDecisionAmount'] = $depositDecision['amountToCharge'];
+
+            $draft = Invoice::create([
+                'customerId' => $this->customerId(),
+                'type' => 'deposit',
+                'buyer' => $this->buyerBlock(),
+                'taxDecisionId' => $depositDecision['id'],
+                'decisionLines' => [['taxLineRef' => 'acompte-prestation', 'unit' => 'unit']],
+                'dates' => ['issued' => gmdate('Y-m-d'), 'due' => gmdate('Y-m-d', strtotime('+30 days'))],
+                'payment' => $this->paymentTerms(),
+            ], $this->idem->key('K7-deposit'));
+
+            $deposit = Invoice::finalize($draft['id']);
+
+            // Record the payment IN FULL — exactly the decided amount. Until
+            // this happens the deposit is not prepaid, and must not be deducted.
+            Payment::create($deposit['id'], [
+                'amount' => $depositDecision['amountToCharge'],
+                'method' => 'transfer',
+                'paidAt' => gmdate('Y-m-d'),
+            ], $this->idem->key('K7-deposit-payment'));
+
+            $settled = Invoice::retrieve($deposit['id']);
+            $this->state['depositInvoiceId'] = $deposit['id'];
+            $this->state['depositSettled'] = (($settled['paymentStatus'] ?? $settled['status'] ?? null) === 'paid');
+
+            return [
+                'depositId' => $deposit['id'],
+                'number' => $deposit['number'] ?? null,
+                'settled' => $this->state['depositSettled'],
+            ];
+        });
+
+        $this->step('K8', 'invoices.create — balance with the SETTLED deposit + schedule', function (): array {
+            if (($this->state['depositSettled'] ?? false) !== true) {
+                // Attaching an unsettled deposit would misstate BT-113.
+                return ['skipped' => true, 'reason' => 'the deposit is not settled'];
+            }
+
+            $balanceDecision = $this->decide([[
+                'reference' => 'prestation-atelier',
+                'description' => 'Prestation d\'atelier',
+                'category' => 'services',
+                'rateCategory' => 'standard',
+                'unitAmount' => 8000,
+                'quantity' => '10',
+            ]], 'K8-balance-decision');
+            if ($balanceDecision === null) {
+                return ['skipped' => true, 'reason' => 'the balance decision is not final'];
+            }
+
+            // Deposits and schedule settle SERVER-SIDE against the decided
+            // amount: the instalments distribute exactly what remains due after
+            // the prepaid deposit (BT-113/BT-115), the last one on the due
+            // date (BT-9).
+            $stillDue = $balanceDecision['amountToCharge'] - (int) $this->state['depositDecisionAmount'];
+            $firstInstalment = intdiv($stillDue, 2);
+            $draft = Invoice::create([
+                'customerId' => $this->customerId(),
+                'buyer' => $this->buyerBlock(),
+                'taxDecisionId' => $balanceDecision['id'],
+                'decisionLines' => [['taxLineRef' => 'prestation-atelier', 'unit' => 'hour']],
+                'dates' => ['issued' => gmdate('Y-m-d'), 'due' => gmdate('Y-m-d', strtotime('+30 days'))],
+                'payment' => $this->paymentTerms(),
+                'deposits' => [['invoiceId' => $this->state['depositInvoiceId']]],
+                'schedule' => [
+                    ['amount' => $firstInstalment, 'dueDate' => gmdate('Y-m-d', strtotime('+15 days')), 'label' => 'Premier versement'],
+                    ['amount' => $stillDue - $firstInstalment, 'dueDate' => gmdate('Y-m-d', strtotime('+30 days')), 'label' => 'Solde'],
+                ],
+            ], $this->idem->key('K8-balance'));
+
+            $balance = Invoice::finalize($draft['id']);
+
+            return [
+                'invoiceId' => $balance['id'],
+                'totalTTC' => $balance['totals']['totalTTC'] ?? null,
+                'amountPaid' => $balance['totals']['amountPaid'] ?? null,
+                'amountDue' => $balance['totals']['amountDue'] ?? null,
+            ];
+        });
+    }
+
+    /**
+     * Credit a DECIDED invoice through `creditedLines`.
+     *
+     * The rate, the category, the VATEX code and the legal mention are
+     * inherited from the invoice's frozen snapshot; restating them through
+     * There is no way to restate them.
+     */
+    public function decidedCreditNote(): void
+    {
+        $this->step('K9', 'creditNotes.create — creditedLines on a decided invoice', function (): array {
+            if (!isset($this->state['decidedInvoiceId'])) {
+                return ['skipped' => true, 'reason' => 'no decided invoice in this run'];
+            }
+
+            $creditNote = CreditNote::create([
+                'relatedInvoiceId' => $this->state['decidedInvoiceId'],
+                'creditNoteType' => 'partial',
+                'reasonCode' => 'quality',
+                'reason' => 'Partial credit on a decided invoice',
+                // Either `quantity` or `amountTTC`, never both. Omitting both
+                // credits the line's whole remaining balance.
+                'creditedLines' => [['taxLineRef' => 'abo-pro', 'amountTTC' => 1200]],
+            ], $this->idem->key('K9-decided-credit-note'));
+
+            return [
+                'creditNoteId' => $creditNote['id'],
+                'originalTaxDecisionId' => $creditNote['originalTaxDecisionId'] ?? null,
+            ];
+        });
+    }
+
+    /**
+     * A recurrence on the decided journey.
+     *
+     * `taxInputs` carries the OPERATION, not a decision: a recurrence never
+     * stores one. Each occurrence is decided on its own effective date, so a
+     * schedule created today does not carry this quarter's rules into next year.
+     */
+    public function decidedRecurring(): void
+    {
+        $this->step('K10', 'recurringInvoices.create — taxInputs, decided per occurrence', function (): array {
             $recurring = RecurringInvoice::create([
                 'customerId' => $this->customerId(),
                 'frequency' => 'monthly',
                 'startDate' => gmdate('Y-m-d'),
                 'nextGenerationDate' => gmdate('Y-m-d', strtotime('+1 month')),
+                'taxInputs' => [
+                    'taxSource' => 'facturino',
+                    'priceMode' => 'tax_exclusive',
+                    'lines' => [[
+                        'reference' => 'abo-pro',
+                        'description' => 'Abonnement Atelier Dupont — Studio',
+                        'category' => 'electronically_supplied_services',
+                        'rateCategory' => 'standard',
+                        'unitAmount' => 9900,
+                        'quantity' => '1',
+                        'unit' => 'month',
+                    ]],
+                ],
+                // `templateInvoice` carries presentation and terms only —
+                // never a line, never a rate.
+                'templateInvoice' => ['paymentMethod' => 'transfer', 'paymentTermsDays' => 30],
+            ], $this->idem->key('K10-decided-recurring'));
+
+            return ['recurringId' => $recurring['id']];
+        });
+    }
+
+    /**
+     * K11 — The OTHER fiscal journey: the VAT is supplied by the integration.
+     *
+     * An ERP or an in-house rules service that already determines the VAT
+     * declares it on the decision (`taxSource: integration`). Facturino
+     * validates the coherence of what is supplied and refuses contradictions
+     * (`integration_vat_incoherent`) — it never silently corrects a rate. The
+     * decision, the invoice and the reporting obligations then work exactly
+     * as on the `facturino` source: the two journeys are equals.
+     */
+    public function integrationDecision(): void
+    {
+        $this->step('K11', 'taxDecisions.create — VAT supplied by the integration', function (): array {
+            $decision = TaxDecision::create([
+                'taxSource' => 'integration',
+                'customerId' => $this->customerId(),
+                'effectiveAt' => gmdate('Y-m-d'),
+                'currency' => 'eur',
+                'priceMode' => 'tax_exclusive',
+                'lines' => [[
+                    'reference' => 'conseil-integ',
+                    'description' => 'Prestation de conseil (TVA fournie par l\'ERP)',
+                    'category' => 'services',
+                    'unitAmount' => 10000,
+                    'quantity' => '1',
+                    'vatRate' => 2000, // 20,00 % — concluded by YOUR system
+                    'vatCode' => 'S',
+                ]],
+            ], $this->idem->key('K11-integration-decision'));
+
+            if (($decision['status'] ?? null) !== 'final' || ($decision['amountToCharge'] ?? null) === null) {
+                return ['skipped' => true, 'status' => $decision['status'] ?? null];
+            }
+
+            $invoice = Invoice::create([
+                'customerId' => $this->customerId(),
+                'buyer' => $this->buyerBlock(),
+                'taxDecisionId' => $decision['id'],
+                'decisionLines' => [['taxLineRef' => 'conseil-integ', 'unit' => 'unit']],
+                'dates' => ['issued' => gmdate('Y-m-d'), 'due' => gmdate('Y-m-d', strtotime('+30 days'))],
+                'payment' => $this->paymentTerms(),
+            ], $this->idem->key('K11-integration-invoice'));
+            $finalized = Invoice::finalize($invoice['id']);
+
+            return [
+                'taxSource' => $finalized['taxSource'] ?? null,
+                'invoiceId' => $finalized['id'],
+                'number' => $finalized['number'] ?? null,
+            ];
+        });
+
+        $this->step('K11b', 'incoherent supplied VAT is refused, never corrected', function (): array {
+            try {
+                TaxDecision::create([
+                    'taxSource' => 'integration',
+                    'customerId' => $this->customerId(),
+                    'effectiveAt' => gmdate('Y-m-d'),
+                    'currency' => 'eur',
+                    'priceMode' => 'tax_exclusive',
+                    'lines' => [[
+                        'reference' => 'incoherent',
+                        'description' => 'Ligne incoherente (demonstration du refus)',
+                        'category' => 'services',
+                        'unitAmount' => 10000,
+                        'quantity' => '1',
+                        // A positive rate cannot carry an exemption code.
+                        'vatRate' => 2000,
+                        'vatCode' => 'S',
+                        'vatexCode' => 'VATEX-EU-G',
+                    ]],
+                ], $this->idem->key('K11b-incoherent'));
+
+                return ['refused' => false, 'unexpected' => 'the contradiction was accepted'];
+            } catch (\Facturino\Exception\InvalidRequestException $e) {
+                return ['refused' => true, 'code' => 'integration_vat_incoherent'];
+            }
+        });
+    }
+
+    public function recurring(): void
+    {
+        $this->step('E16', 'recurringInvoices.create — abonnement mensuel', function (): array {
+            // `taxInputs` porte l'operation et sa source fiscale ; chaque
+            // echeance est decidee a sa propre date de generation.
+            $recurring = RecurringInvoice::create([
+                'customerId' => $this->customerId(),
+                'frequency' => 'monthly',
+                'startDate' => gmdate('Y-m-d'),
+                'nextGenerationDate' => gmdate('Y-m-d', strtotime('+1 month')),
+                'taxInputs' => [
+                    'taxSource' => 'facturino',
+                    'priceMode' => 'tax_exclusive',
+                    'lines' => [[
+                        'reference' => 'abo-studio',
+                        'description' => 'Abonnement Atelier Dupont — Studio',
+                        'category' => 'electronically_supplied_services',
+                        'rateCategory' => 'standard',
+                        'unitAmount' => 9900, // 99,00 EUR HT
+                        'quantity' => '1',
+                        'unit' => 'month',
+                    ]],
+                ],
+                // Presentation et conditions uniquement — jamais une ligne.
                 'templateInvoice' => [
-                    'items' => [
-                        [
-                            'description' => 'Abonnement Atelier Dupont — Studio',
-                            'quantity' => '1',
-                            'unit' => 'month',
-                            'unitPrice' => 9900, // 99,00 EUR HT
-                            'vatRate' => 2000,
-                            'vatCode' => 'S',
-                        ],
-                    ],
                     'paymentMethod' => 'transfer',
                     'paymentTermsDays' => 30,
                 ],
@@ -605,21 +1091,16 @@ final class Scenario
     public function creditNote(): void
     {
         $this->step('F17', 'creditNotes.create — avoir lie a la facture', function (): array {
+            // `creditedLines` reference les lignes DECIDEES de la facture : le
+            // taux, la categorie, le code VATEX et la mention legale sont
+            // herites du snapshot fige, jamais reformules.
             $credit = CreditNote::create([
-                'customerId' => $this->customerId(),
                 'relatedInvoiceId' => $this->invoiceId(), // BT-25 : avoir rattache a la facture emise
                 'creditNoteType' => 'partial',
                 'reasonCode' => 'other',
                 'reason' => 'Remise commerciale exceptionnelle',
-                'items' => [
-                    [
-                        'description' => 'Avoir partiel — prestation conseil',
-                        'quantity' => '1',
-                        'unit' => 'hour',
-                        'unitPrice' => 5000, // 50,00 EUR HT
-                        'vatRate' => 2000,
-                        'vatCode' => 'S',
-                    ],
+                'creditedLines' => [
+                    ['taxLineRef' => 'conseil-2h', 'amountTTC' => 6000], // 50,00 EUR HT + TVA
                 ],
                 'dates' => [
                     'issued' => gmdate('Y-m-d'),
@@ -950,48 +1431,132 @@ final class Scenario
      *
      * @return array<string, mixed>
      */
-    private function invoicePayload(): array
+    /**
+     * Take a `facturino`-source decision on the given commercial lines.
+     * Returns null unless the decision is final: `pending_verification` means
+     * "cannot conclude yet", never "0".
+     *
+     * @param array<int, array<string, mixed>> $lines
+     * @return array<string, mixed>|null
+     */
+    private function decide(array $lines, string $keySuffix, ?string $effectiveAt = null): ?array
+    {
+        $decision = TaxDecision::create([
+            'taxSource' => 'facturino',
+            'customerId' => $this->customerId(),
+            // Quand la decision fiscalise un brouillon EXISTANT, elle doit
+            // prendre effet a la date d'emission de ce brouillon : une decision
+            // datee ailleurs decrit une autre operation et est refusee a la
+            // liaison.
+            'effectiveAt' => $effectiveAt ?? gmdate('Y-m-d'),
+            'currency' => 'eur',
+            'priceMode' => 'tax_exclusive',
+            'lines' => $lines,
+        ], $this->idem->key($keySuffix));
+
+        if (($decision['status'] ?? null) !== 'final' || ($decision['amountToCharge'] ?? null) === null) {
+            return null;
+        }
+
+        return $decision;
+    }
+
+    /**
+     * Restate the operation a commercial draft carries, so the decision covers
+     * exactly it — same references, same amounts, no VAT.
+     *
+     * @param array<string, mixed> $draft
+     * @return array<int, array<string, mixed>>
+     */
+    private function decisionLinesFromDraft(array $draft): array
+    {
+        $lines = [];
+        foreach ($draft['lines'] as $line) {
+            $decisionLine = [
+                'reference' => $line['reference'],
+                'description' => $line['description'],
+                'category' => $line['supplyCategory'],
+                'rateCategory' => $line['rateCategory'],
+                'unitAmount' => $line['unitPrice'],
+                'quantity' => $line['quantity'],
+            ];
+            if (isset($line['discount'])) {
+                $decisionLine['discount'] = $line['discount'];
+            }
+            $lines[] = $decisionLine;
+        }
+
+        return $lines;
+    }
+
+    /**
+     * Render the decided lines on the document: unit and catalogue product
+     * only — the VAT comes from the decision.
+     *
+     * @param array<string, mixed> $draft
+     * @return array<int, array<string, mixed>>
+     */
+    private function presentationFromDraft(array $draft): array
+    {
+        $lines = [];
+        foreach ($draft['lines'] as $line) {
+            $presentation = ['taxLineRef' => $line['reference'], 'unit' => $line['unit']];
+            if (isset($line['product'])) {
+                $presentation['product'] = $line['product'];
+            }
+            $lines[] = $presentation;
+        }
+
+        return $lines;
+    }
+
+    /**
+     * The main commercial operation (decision lines: no rate is stated —
+     * Facturino concludes).
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function mainOperationLines(): array
+    {
+        return [
+            [
+                'reference' => 'conseil-2h',
+                'description' => 'Prestation conseil (2h)',
+                'category' => 'services',
+                'rateCategory' => 'standard',
+                'unitAmount' => 12000, // 120,00 EUR HT / heure
+                'quantity' => '2',
+            ],
+            [
+                'reference' => 'abo-studio',
+                'description' => 'Abonnement Studio — 1 mois',
+                'category' => 'electronically_supplied_services',
+                'rateCategory' => 'standard',
+                'unitAmount' => 6000,  // 60,00 EUR HT
+                'quantity' => '1',
+            ],
+        ];
+    }
+
+    /**
+     * Assemble the decision-backed invoice payload: the document lines
+     * reference the decided lines and carry presentation only.
+     *
+     * @return array<string, mixed>
+     */
+    private function invoicePayloadFromDecision(string $taxDecisionId): array
     {
         return [
             'customerId' => $this->customerId(),
             'purchaseOrderNumber' => 'PO-2026-0042', // BT-13
+            'taxDecisionId' => $taxDecisionId,
+            'decisionLines' => [
+                ['taxLineRef' => 'conseil-2h', 'unit' => 'hour'],
+                ['taxLineRef' => 'abo-studio', 'unit' => 'month'],
+            ],
             // BG-7 acheteur : SIRET 14 chiffres requis pour le B2B (CIUS-FR BT-46).
-            'buyer' => [
-                'companyName' => 'Boulangerie Martin SARL',
-                'siret' => '73282932000074',
-                'vatNumber' => 'FR47732829320',
-                'address' => [
-                    'line1' => '12 rue du Four',
-                    'postalCode' => '69002',
-                    'city' => 'Lyon',
-                    'country' => 'FR',
-                ],
-            ],
-            'lines' => [
-                [
-                    'description' => 'Prestation conseil (2h)',
-                    'quantity' => '2',
-                    'unit' => 'hour',
-                    'unitPrice' => 12000, // 120,00 EUR HT / heure
-                    'vatRate' => 2000,    // 20,00 %
-                    'vatCode' => 'S',
-                ],
-                [
-                    'description' => 'Abonnement Studio — 1 mois',
-                    'quantity' => '1',
-                    'unit' => 'month',
-                    'unitPrice' => 6000,  // 60,00 EUR HT
-                    'vatRate' => 2000,
-                    'vatCode' => 'S',
-                ],
-            ],
-            'payment' => [
-                'terms' => 'Paiement a 30 jours',
-                'termsDays' => 30,
-                'method' => 'transfer',
-                'latePaymentRate' => '10.00', // taux des penalites de retard (%)
-                'collectionFee' => '40.00',   // indemnite forfaitaire de recouvrement (EUR)
-            ],
+            'buyer' => $this->buyerBlock(),
+            'payment' => $this->paymentTerms(),
             'dates' => [
                 'issued' => gmdate('Y-m-d'),
                 'due' => gmdate('Y-m-d', strtotime('+30 days')),
@@ -1041,6 +1606,44 @@ final class Scenario
         }
 
         return $id;
+    }
+
+    /**
+     * Buyer block (BG-7) shared by the invoices this scenario issues. A 14-digit
+     * SIRET is required for B2B (CIUS-FR BT-46).
+     *
+     * @return array<string, mixed>
+     */
+    private function buyerBlock(): array
+    {
+        return [
+            'companyName' => 'Boulangerie Martin SARL',
+            'siret' => '73282932000074',
+            'vatNumber' => 'FR47732829320',
+            'address' => [
+                'line1' => '12 rue du Four',
+                'postalCode' => '69002',
+                'city' => 'Lyon',
+                'country' => 'FR',
+            ],
+        ];
+    }
+
+    /**
+     * Payment terms shared by the invoices this scenario issues (BT-20, and the
+     * late-payment rate plus recovery fee required by Code de commerce L441-10).
+     *
+     * @return array<string, mixed>
+     */
+    private function paymentTerms(): array
+    {
+        return [
+            'terms' => 'Paiement a 30 jours',
+            'termsDays' => 30,
+            'method' => 'transfer',
+            'latePaymentRate' => '10.00',
+            'collectionFee' => '40.00',
+        ];
     }
 
     private function customerId(): string

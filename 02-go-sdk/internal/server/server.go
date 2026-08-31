@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	facturino "github.com/facturino/facturino-go"
+	facturino "github.com/facturino/facturino-go/v2"
 
 	"github.com/facturino/facturino-demo/go-sdk/internal/config"
 	"github.com/facturino/facturino-demo/go-sdk/internal/scenario"
@@ -48,15 +48,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/state", s.handleState)
 
-	// Full parcours.
+	// Full workflow.
 	mux.HandleFunc("/run", s.requirePost(s.handleRunAll))
 
-	// Per-phase routes (A..J). Each runs one StepXxx in scenario order.
+	// Per-phase routes (A..K). Each runs one StepXxx in scenario order.
 	mux.HandleFunc("/run/bootstrap", s.requirePost(s.phase(s.runner.StepBootstrap)))
 	mux.HandleFunc("/run/catalogue", s.requirePost(s.phase(s.runner.StepCatalogueAndCustomer)))
 	mux.HandleFunc("/run/quote", s.requirePost(s.phase(s.runner.StepQuoteToInvoice)))
 	mux.HandleFunc("/run/invoice", s.requirePost(s.phase(s.runner.StepInvoiceLifecycle)))
 	mux.HandleFunc("/run/recurring", s.requirePost(s.phase(s.runner.StepRecurring)))
+	mux.HandleFunc("/run/tax-decision", s.requirePost(s.phase(s.runner.StepTaxDecision)))
+	mux.HandleFunc("/run/decided-credit-note", s.requirePost(s.phase(s.runner.StepDecidedCreditNote)))
+	mux.HandleFunc("/run/decided-recurring", s.requirePost(s.phase(s.runner.StepDecidedRecurring)))
+	mux.HandleFunc("/run/deposit-schedule", s.requirePost(s.phase(s.runner.StepDepositAndSchedule)))
+	mux.HandleFunc("/run/integration-decision", s.requirePost(s.phase(s.runner.StepIntegrationDecision)))
 	mux.HandleFunc("/run/credit-note", s.requirePost(s.phase(s.runner.StepCreditNote)))
 	mux.HandleFunc("/run/received", s.requirePost(s.phase(s.runner.StepReceivedInvoices)))
 	mux.HandleFunc("/run/webhooks", s.requirePost(s.phase(s.runner.StepWebhooks)))
@@ -138,23 +143,24 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":      "facturino-demo (Go)",
-		"scenario":  "Atelier Dupont — full A..J parcours",
+		"scenario":  "Atelier Dupont — full A..K workflow",
 		"test_mode": s.cfg.IsTestMode(),
 		"routes": map[string]string{
-			"POST /run":                "run the full scenario A..J",
-			"POST /run/bootstrap":      "A — account, company, usage",
-			"POST /run/catalogue":      "B — products + customer",
-			"POST /run/quote":          "C — quote -> draft invoice + validate",
-			"POST /run/invoice":        "D — finalize, documents, PA, payment, audit",
-			"POST /run/recurring":      "E — monthly subscription schedule",
-			"POST /run/credit-note":    "F — credit note",
-			"POST /run/received":       "G — supplier/received invoices",
-			"POST /run/webhooks":       "H — register endpoint + events",
-			"POST /run/accounting":     "I — reporting, exports, e-reporting, archives",
-			"POST /run/administration": "J — billing, RGPD",
-			"POST /webhooks":           "receive a signed Facturino event",
-			"GET /state":               "current scenario state snapshot",
-			"GET /healthz":             "liveness probe",
+			"POST /run":                      "run the full scenario A..J",
+			"POST /run/bootstrap":            "A — account, company, usage",
+			"POST /run/catalogue":            "B — products + customer",
+			"POST /run/quote":                "C — quote -> draft invoice + validate",
+			"POST /run/invoice":              "D — finalize, documents, PA, payment, audit",
+			"POST /run/recurring":            "E — monthly subscription schedule",
+			"POST /run/integration-decision": "K — VAT supplied by the integration",
+			"POST /run/credit-note":          "F — credit note",
+			"POST /run/received":             "G — supplier/received invoices",
+			"POST /run/webhooks":             "H — register endpoint + events",
+			"POST /run/accounting":           "I — reporting, exports, e-reporting, archives",
+			"POST /run/administration":       "J — billing, RGPD",
+			"POST /webhooks":                 "receive a signed Facturino event",
+			"GET /state":                     "current scenario state snapshot",
+			"GET /healthz":                   "liveness probe",
 		},
 	})
 }

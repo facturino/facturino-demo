@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	facturino "github.com/facturino/facturino-go"
+	facturino "github.com/facturino/facturino-go/v2"
 )
 
 // StepQuoteToInvoice covers phase C: issue a quote, send it, have it
@@ -72,20 +72,23 @@ func (r *Runner) StepQuoteToInvoice(ctx context.Context) error {
 		return err
 	})
 
-	// C.8 — Dry validation of an invoice payload (EN16931 + CIUS-FR) with
-	// no write. This is the cheap pre-flight a SaaS runs before emitting.
-	r.runStep("validate.Run (invoice payload)", func() error {
+	// C.8 — Dry validation of an invoice payload (EN16931 + CIUS-FR) with no
+	// write. Even the pre-flight is decision-first: the decision is taken
+	// before anything is validated, the validation persists nothing and does
+	// not consume the decision — phase D reuses it for the real create.
+	r.runStep("taxDecisions.Create + validate.Run (decision-backed payload)", func() error {
+		decision, err := r.decide(mainOperationLines(r), "main-decision")
+		if err != nil || decision == nil {
+			return err
+		}
+		r.state.MainDecisionID = decision.ID
 		res, err := r.client.Validate.Run(&facturino.InvoiceParams{
-			Customer: r.state.CustomerID,
-			Buyer: &facturino.BuyerParams{
-				CompanyName: "Beta Industries SAS",
-				Address:     &facturino.Address{Line1: "29 boulevard Haussmann", PostalCode: "75009", City: "Paris", Country: "FR"},
-			},
-			Items: []*facturino.ItemParams{
-				{Description: "Abonnement Atelier Pro", Quantity: "1", Unit: "month", UnitPrice: 4900, VATRate: 2000, VATCode: "S"},
-			},
-			Dates:   &facturino.InvoiceDatesParams{Issued: today(), Due: inDays(30)},
-			Payment: &facturino.PaymentTermsParams{Terms: "30 jours net", TermsDays: 30, Method: "transfer", LatePaymentRate: "10.00", CollectionFee: "40.00"},
+			Customer:      r.state.CustomerID,
+			Buyer:         mainBuyer(),
+			TaxDecisionID: decision.ID,
+			DecisionLines: mainDecisionLines(r),
+			Dates:         &facturino.InvoiceDatesParams{Issued: today(), Due: inDays(30)},
+			Payment:       mainPaymentTerms(),
 		})
 		if err == nil {
 			r.log.OK("valid=%t warnings=%d", res.Valid, len(res.Warnings))
@@ -93,17 +96,98 @@ func (r *Runner) StepQuoteToInvoice(ctx context.Context) error {
 		return err
 	})
 
-	// C.7 — Convert the accepted quote into a draft invoice.
-	r.runStep("quotes.Convert -> draft invoice", func() error {
+	// C.7 — Convert the accepted quote into a COMMERCIAL draft: the quote's
+	// VAT was indicative, so the draft awaits its own decision. Phase D binds
+	// the decision to THIS invoice and finalizes it — the quote cycle runs on
+	// one document, and the converted draft is never abandoned.
+	r.runStep("quotes.Convert -> commercial draft", func() error {
 		inv, err := r.client.Quotes.Convert(quote.ID)
-		if err == nil {
-			r.state.InvoiceID = inv.ID
-			r.log.OK("draft invoice %s from quote", inv.ID)
+		if err != nil {
+			return err
 		}
-		return err
+		if inv.ID == "" {
+			return fmt.Errorf("quotes.Convert returned no invoice id; the quote cycle cannot continue")
+		}
+		if inv.CommercialDraft == nil || len(inv.CommercialDraft.Lines) == 0 {
+			return fmt.Errorf("converted draft %s carries no commercial operation; the quote cycle cannot continue", inv.ID)
+		}
+		r.state.ConvertedInvoiceID = inv.ID
+		r.state.ConvertedDraft = inv.CommercialDraft
+		// The decision must take effect on the DRAFT's own issue date.
+		if inv.Dates != nil {
+			r.state.ConvertedIssuedOn = inv.Dates.Issued
+		}
+		r.log.OK("commercial draft %s from quote (not decided yet: taxSource null)", inv.ID)
+		return nil
 	})
 
 	return nil
+}
+
+// decisionLinesFromDraft restates the operation a commercial draft carries, so
+// the decision covers exactly it — same references, same amounts, no VAT.
+func decisionLinesFromDraft(draft *facturino.CommercialDraft) []*facturino.TaxDecisionLineParams {
+	lines := make([]*facturino.TaxDecisionLineParams, 0, len(draft.Lines))
+	for _, line := range draft.Lines {
+		lines = append(lines, &facturino.TaxDecisionLineParams{
+			Reference:    line.Reference,
+			Description:  line.Description,
+			Category:     line.SupplyCategory,
+			RateCategory: line.RateCategory,
+			UnitAmount:   line.UnitPrice,
+			Quantity:     line.Quantity,
+			Discount:     line.Discount,
+		})
+	}
+	return lines
+}
+
+// presentationFromDraft renders the decided lines on the document: unit and
+// catalogue product only — the VAT comes from the decision.
+func presentationFromDraft(draft *facturino.CommercialDraft) []*facturino.DecisionLineParams {
+	lines := make([]*facturino.DecisionLineParams, 0, len(draft.Lines))
+	for _, line := range draft.Lines {
+		lines = append(lines, &facturino.DecisionLineParams{
+			TaxLineRef: line.Reference,
+			Unit:       line.Unit,
+			Product:    line.Product,
+		})
+	}
+	return lines
+}
+
+// mainBuyer is the buyer block (BG-7) shared by the main-operation documents.
+func mainBuyer() *facturino.BuyerParams {
+	return &facturino.BuyerParams{
+		CompanyName: "Menuiserie Lemoine SARL",
+		Siret:       "55204944776279",
+		VATNumber:   "FR40552049447",
+		Address:     &facturino.Address{Line1: "12 rue des Artisans", PostalCode: "69007", City: "Lyon", Country: "FR"},
+		// BG-7 delivery address (CIUS-FR requirement).
+		DeliveryAddress: &facturino.Address{Line1: "Entrepot Est, 4 allee du Bois", PostalCode: "69800", City: "Saint-Priest", Country: "FR"},
+	}
+}
+
+func mainPaymentTerms() *facturino.PaymentTermsParams {
+	return &facturino.PaymentTermsParams{Terms: "30 jours net", TermsDays: 30, Method: "transfer", LatePaymentRate: "10.00", CollectionFee: "40.00"}
+}
+
+// mainOperationLines describes the main commercial operation for a tax
+// decision: no rate is stated — Facturino concludes.
+func mainOperationLines(r *Runner) []*facturino.TaxDecisionLineParams {
+	return []*facturino.TaxDecisionLineParams{
+		{Reference: "mise-en-place", Description: "Prestation de mise en place", Category: "services", RateCategory: "standard", UnitAmount: 75000, Quantity: "1"},
+		{Reference: "abo-pro-m1", Description: "Abonnement Atelier Pro (mois 1)", Category: "electronically_supplied_services", RateCategory: "standard", UnitAmount: 4900, Quantity: "1"},
+	}
+}
+
+// mainDecisionLines renders the decided lines on the document: presentation
+// only — the VAT comes from the decision.
+func mainDecisionLines(r *Runner) []*facturino.DecisionLineParams {
+	return []*facturino.DecisionLineParams{
+		{TaxLineRef: "mise-en-place", Unit: "flat_rate", Product: r.state.OneOffProductID},
+		{TaxLineRef: "abo-pro-m1", Unit: "month", Product: r.state.SubscriptionProductID},
+	}
 }
 
 // StepInvoiceLifecycle covers phase D: create (or reuse) a draft, finalize
@@ -121,25 +205,60 @@ func (r *Runner) StepInvoiceLifecycle(ctx context.Context) error {
 		return fmt.Errorf("no customer in state; run phase B first")
 	}
 
-	// D.9 — Create a draft if the quote conversion did not produce one.
-	if r.state.InvoiceID == "" {
-		r.log.Step("invoices.Create (draft)")
-		inv, err := r.client.Invoices.Create(&facturino.InvoiceParams{
-			Customer: r.state.CustomerID,
-			Buyer: &facturino.BuyerParams{
-				CompanyName: "Menuiserie Lemoine SARL",
-				Siret:       "55204944776279",
-				VATNumber:   "FR40552049447",
-				Address:     &facturino.Address{Line1: "12 rue des Artisans", PostalCode: "69007", City: "Lyon", Country: "FR"},
-				// BG-7 delivery address (CIUS-FR requirement).
-				DeliveryAddress: &facturino.Address{Line1: "Entrepot Est, 4 allee du Bois", PostalCode: "69800", City: "Saint-Priest", Country: "FR"},
-			},
-			Items: []*facturino.ItemParams{
-				{Description: "Prestation de mise en place", Quantity: "1", Unit: "flat_rate", UnitPrice: 75000, VATRate: 2000, VATCode: "S", Product: r.state.OneOffProductID},
-				{Description: "Abonnement Atelier Pro (mois 1)", Quantity: "1", Unit: "month", UnitPrice: 4900, VATRate: 2000, VATCode: "S", Product: r.state.SubscriptionProductID},
-			},
-			Dates:   &facturino.InvoiceDatesParams{Issued: today(), Due: inDays(30)},
-			Payment: &facturino.PaymentTermsParams{Terms: "30 jours net", TermsDays: 30, Method: "transfer", LatePaymentRate: "10.00", CollectionFee: "40.00"},
+	// D.9 — The invoice is the one the QUOTE produced. Its commercial block is
+	// read back from the converted draft: the line references are assigned
+	// server-side at conversion, and the decision must state exactly the
+	// operation the draft carries. The decision is then BOUND to that same
+	// invoice — creating a second one would orphan the converted draft.
+	var inv *facturino.Invoice
+	var err error
+	if r.state.ConvertedInvoiceID != "" {
+		if r.state.ConvertedDraft == nil || len(r.state.ConvertedDraft.Lines) == 0 || r.state.ConvertedIssuedOn == "" {
+			return fmt.Errorf("converted draft %s carries no commercial operation; the quote cycle cannot continue", r.state.ConvertedInvoiceID)
+		}
+		decision, derr := r.decideOn(
+			decisionLinesFromDraft(r.state.ConvertedDraft),
+			"converted-draft-decision",
+			r.state.ConvertedIssuedOn,
+		)
+		if derr != nil {
+			return derr
+		}
+		if decision == nil {
+			return fmt.Errorf("the operation of draft %s is not decidable; no invoice is issued", r.state.ConvertedInvoiceID)
+		}
+		r.state.MainDecisionID = decision.ID
+
+		r.log.Step("invoices.BindTaxDecision (converted quote draft %s)", r.state.ConvertedInvoiceID)
+		inv, err = r.client.Invoices.BindTaxDecision(r.state.ConvertedInvoiceID, &facturino.BindTaxDecisionParams{
+			TaxDecisionID:  decision.ID,
+			DecisionLines:  presentationFromDraft(r.state.ConvertedDraft),
+			IdempotencyKey: r.idemKey("bind-decision"),
+		})
+		if err != nil {
+			return err
+		}
+		r.log.OK("decision %s bound to the converted draft %s", decision.ID, inv.ID)
+	} else {
+		// No quote ran: the invoice is created directly from its own decision.
+		if r.state.MainDecisionID == "" {
+			decision, derr := r.decide(mainOperationLines(r), "main-decision")
+			if derr != nil {
+				return derr
+			}
+			if decision == nil {
+				return fmt.Errorf("the main decision is not final; cannot invoice")
+			}
+			r.state.MainDecisionID = decision.ID
+		}
+		r.log.Step("invoices.Create (from the decision)")
+		inv, err = r.client.Invoices.Create(&facturino.InvoiceParams{
+			Customer:      r.state.CustomerID,
+			Buyer:         mainBuyer(),
+			TaxDecisionID: r.state.MainDecisionID,
+			DecisionLines: mainDecisionLines(r),
+			Dates:         &facturino.InvoiceDatesParams{Issued: today(), Due: inDays(30)},
+			Payment:       mainPaymentTerms(),
 			// BT-13 buyer purchase-order reference.
 			PurchaseOrderNumber: "PO-2026-0142",
 			Notes:               "Merci pour votre confiance.",
@@ -148,9 +267,9 @@ func (r *Runner) StepInvoiceLifecycle(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		r.state.InvoiceID = inv.ID
-		r.log.OK("draft invoice %s", inv.ID)
 	}
+	r.state.InvoiceID = inv.ID
+	r.log.OK("draft invoice %s taxSource=%s", inv.ID, inv.TaxSource)
 	invID := r.state.InvoiceID
 
 	// D.9 — Finalize: assigns the legal number atomically.

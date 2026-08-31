@@ -3,8 +3,8 @@
 Routes
 ------
 GET  /                 Health + index of available routes.
-POST /run              Run the full A->J scenario; returns a structured report.
-POST /run/<phase>      Run a single phase (a..j); bootstraps prerequisites.
+POST /run              Run the full A->K scenario; returns a structured report.
+POST /run/<phase>      Run a single phase (a..k); bootstraps prerequisites.
 POST /webhooks         Receive Facturino events: verify the signature, dispatch.
 
 Run it with::
@@ -41,7 +41,7 @@ def create_app() -> Flask:
                 "base_url": settings.base_url,
                 "webhook_url": settings.webhook_url,
                 "routes": {
-                    "POST /run": "Run the full A->J scenario",
+                    "POST /run": "Run the full A->K scenario",
                     "POST /run/<phase>": f"Run one phase ({'/'.join(PHASES)})",
                     "POST /webhooks": "Receive signed Facturino events",
                 },

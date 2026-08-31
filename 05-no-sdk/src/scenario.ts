@@ -49,11 +49,45 @@ interface Quote extends Identified {
   status?: string;
   number?: string;
 }
+/** One line of a commercial draft: the operation as stated, with NO VAT. */
+interface CommercialDraftLine {
+  /** Assigned server-side at conversion; the decision reuses it. */
+  reference: string;
+  description: string;
+  quantity: string;
+  unit: string;
+  /** Prix unitaire en centimes entiers, dans le `priceMode` du brouillon. */
+  unitPrice: number;
+  supplyCategory: string;
+  rateCategory: string;
+  discount?: { type: string; value: number };
+  product?: string | null;
+}
+/** The operation an undecided draft states. A COMMERCIAL total: neither a decided net nor a decided gross amount. */
+interface CommercialDraft {
+  priceMode: string;
+  lines: CommercialDraftLine[];
+  totalCents: number;
+}
 interface Invoice extends Identified {
   status?: string;
   number?: string | null;
-  totals?: { totalTTC?: string; amountDue?: string };
-  // Présent uniquement quand on demande ?expand=credit_notes.
+  dates?: { issued?: string; due?: string };
+  totals?: { totalTTC?: string; amountDue?: string; amountPaid?: string };
+  /**
+   * The operation a COMMERCIAL draft states, before any decision. Present while
+   * `taxSource` is `null`; it disappears once the invoice is bound to a decision.
+   */
+  commercialDraft?: CommercialDraft | null;
+  // Three independent axes; `status` stays their historical projection.
+  documentStatus?: string;
+  transmissionStatus?: string;
+  transmissionDetail?: string | null;
+  paymentStatus?: string;
+  // Fiscal authority of the document.
+  taxSource?: string;
+  taxDecisionId?: string;
+  // Present only when ?expand=credit_notes is requested.
   expanded?: {
     credit_notes?: CreditNote[];
     net_balance?: string;
@@ -65,6 +99,34 @@ interface CreditNote extends Identified {
 }
 interface RecurringInvoice extends Identified {
   status?: string;
+}
+
+/**
+ * Immutable fiscal position. Only a `final` decision carries amounts: on any
+ * other status, `totals` and `amountToCharge` are `null`, never `0`.
+ */
+interface TaxDecision extends Identified {
+  status: 'final' | 'pending_verification' | 'unsupported';
+  /** Fiscal source of the decision: `facturino` or `integration`. */
+  taxSource?: string;
+  customerId: string;
+  currency: string;
+  priceMode: 'tax_exclusive' | 'tax_inclusive';
+  effectiveAt: string;
+  expiresAt?: string;
+  expired?: boolean;
+  rulesVersion?: string;
+  operationFingerprint?: string;
+  totals: { totalHT: number; totalVAT: number; totalTTC: number } | null;
+  amountToCharge: number | null;
+  invoiceChannel: 'einvoicing' | 'none' | null;
+  transactionReporting: 'ereporting' | 'none' | 'outside_scope' | null;
+  paymentReporting: 'fr212' | 'ereporting' | 'none' | null;
+  foreignTaxReviewRequired?: boolean;
+  vies?: { status?: string } | null;
+  issues?: Array<{ code: string; message: string }>;
+  obligationReasons?: Array<{ axis: string; code: string; reference: string; message?: string }>;
+  retryOfTaxDecisionId?: string | null;
 }
 interface WebhookEndpoint extends Identified {
   secret?: string;
@@ -88,6 +150,18 @@ interface ScenarioContext {
   recurringId?: string;
   receivedInvoiceId?: string;
   webhookEndpointId?: string;
+  taxDecisionId?: string;
+  decidedInvoiceId?: string;
+  depositInvoiceId?: string;
+  mainDecisionId?: string;
+  /**
+   * Le brouillon COMMERCIAL produit par la conversion du devis, son bloc
+   * commercial block and its issue date: phase D decides that operation and
+   * binds the decision to THAT document.
+   */
+  convertedInvoiceId?: string;
+  convertedDraft?: CommercialDraft;
+  convertedIssuedOn?: string | null;
 }
 
 export class Scenario {
@@ -95,6 +169,8 @@ export class Scenario {
   private readonly config: Config;
   /** Fresh per run() so re-running never collides on a stale Idempotency-Key. */
   private runId = '';
+  /** Mandatory fiscal-journey steps that failed during the current run. */
+  private fiscalFailures: string[] = [];
 
   constructor(config: Config) {
     this.config = config;
@@ -109,10 +185,11 @@ export class Scenario {
     return idempotencyKey(operation, this.runId, ...parts);
   }
 
-  /** Run the whole A→J parcours. Returns the resulting context. */
+  /** Run the whole A→K workflow. Returns the resulting context. */
   async runAll(): Promise<ScenarioContext> {
     resetSteps();
     this.runId = randomUUID().slice(0, 8);
+    this.fiscalFailures = [];
     const companyId = await this.resolveCompanyId();
     const ctx: ScenarioContext = { companyId };
 
@@ -121,11 +198,22 @@ export class Scenario {
     await this.phaseC(ctx);
     await this.phaseD(ctx);
     await this.phaseE(ctx);
+    await this.phaseK(ctx);
     await this.phaseF(ctx);
     await this.phaseG(ctx);
     await this.phaseH(ctx);
     await this.phaseI(ctx);
     await this.phaseJ();
+
+    if (this.fiscalFailures.length > 0) {
+      // The fiscal journey is the point of the walkthrough: a failed mandatory
+      // step means the scenario did NOT complete, whatever else succeeded.
+      console.log(
+        `\n\x1b[1m\x1b[38;5;196m✗ Scenario failed — ${this.fiscalFailures.length} mandatory fiscal step(s): ` +
+          `${this.fiscalFailures.join(', ')}\x1b[0m`,
+      );
+      throw new Error(`fiscal journey failed at: ${this.fiscalFailures.join(', ')}`);
+    }
 
     console.log('\n\x1b[1m\x1b[38;5;46m✓ Scenario complete.\x1b[0m');
     return ctx;
@@ -166,7 +254,7 @@ export class Scenario {
         { content: cgvPdf },
         this.idem('cgv', ctx.companyId),
       );
-      step('companies.getCgv → GET /companies/:id/cgv (URL signée)');
+      step('companies.getCgv → GET /companies/:id/cgv (signed URL)');
       await this.client.get(`/companies/${ctx.companyId}/cgv`);
       step('companies.deleteCgv → DELETE /companies/:id/cgv');
       await this.client.delete(`/companies/${ctx.companyId}/cgv`);
@@ -211,7 +299,7 @@ export class Scenario {
         description: 'Accès plateforme, mises à jour incluses',
         reference: 'SUB-MONTHLY',
         unitPrice: 4900, // 49,00 € HT, en centimes
-        vatRate: 2000, // 20,00 %, en centièmes de pourcent
+        vatRate: 2000, // 20.00%, in hundredths of a percent
         vatCode: 'S', // taux standard
         unit: 'month',
       },
@@ -240,7 +328,7 @@ export class Scenario {
     const products = await this.client.listAll<Product>('/products', { limit: 50 });
     detail(`${products.length} produit(s) au catalogue`);
 
-    // products.list avec filtres: q (recherche par préfixe de nom), category,
+    // products.list with filters: q (name prefix search), category,
     // active. Ici on retrouve l'abonnement via q="abonnement".
     step('products.list (filtres) → GET /products?q=abonnement&active=true');
     try {
@@ -283,7 +371,7 @@ export class Scenario {
         '/customers/lookup',
         { siret: '55208131766522' },
       );
-      detail(`SIRENE: ${lookup.found ? (lookup.data?.name ?? 'trouvé') : 'aucun résultat'}`);
+      detail(`SIRENE: ${lookup.found ? (lookup.data?.name ?? 'found') : 'no result'}`);
     } catch (err) {
       this.softError('customers.lookup', err);
     }
@@ -295,7 +383,7 @@ export class Scenario {
     const found = existing.find((c) => c.siret === '55208131766522');
     if (found) {
       ctx.customerId = found.id;
-      detail(`client existant réutilisé: ${found.id}`);
+      detail(`reused existing customer: ${found.id}`);
     } else {
       step('customers.create → POST /customers');
       const customer = await this.client.post<Customer>(
@@ -313,14 +401,14 @@ export class Scenario {
             city: 'Paris',
             country: 'FR',
           },
-          // Contact de facturation: reçoit les factures par défaut (role billing).
+          // Billing contact: receives invoices by default (billing role).
           contacts: [{ email: 'compta@cafe-des-artisans.example', role: 'billing' }],
           paymentTerms: 30,
         },
         this.idem('customer', '55208131766522'),
       );
       ctx.customerId = customer.id;
-      detail(`client créé: ${customer.id}`);
+      detail(`customer created: ${customer.id}`);
     }
 
     step(`customers.get → GET /customers/${ctx.customerId}`);
@@ -405,7 +493,7 @@ export class Scenario {
     step(`quotes.accept → POST /quotes/${quote.id}/accept`);
     try {
       await this.client.post(`/quotes/${quote.id}/accept`);
-      detail('devis accepté');
+      detail('quote accepted');
     } catch (err) {
       this.softError('quotes.accept', err);
     }
@@ -425,7 +513,7 @@ export class Scenario {
     }
 
     // quotes.clone: re-proposer un devis similaire en brouillon (sans toucher
-    // l'original accepté). Idempotent par devis source pour rester rejouable.
+    // the accepted original). Idempotent per source quote so it stays replayable.
     step(`quotes.clone → POST /quotes/${quote.id}/clone (re-proposition en brouillon)`);
     try {
       const cloned = await this.client.post<Quote>(
@@ -433,28 +521,41 @@ export class Scenario {
         undefined,
         this.idem('quote.clone', quote.id),
       );
-      detail(`devis cloné (brouillon): ${cloned.id} status=${cloned.status}`);
+      detail(`quote cloned (draft): ${cloned.id} status=${cloned.status}`);
     } catch (err) {
       this.softError('quotes.clone', err);
     }
 
-    step(`quotes.convert → POST /quotes/${quote.id}/convert (→ facture brouillon)`);
-    try {
-      const converted = await this.client.post<Invoice>(`/quotes/${quote.id}/convert`);
-      ctx.invoiceId = converted.id;
-      detail(`facture brouillon issue du devis: ${converted.id}`);
-    } catch (err) {
-      this.softError('quotes.convert', err);
+    step(`quotes.convert → POST /quotes/${quote.id}/convert (→ brouillon commercial)`);
+    // Pas de softError ici : sans brouillon converti, le cycle devis de la
+    // phase D has nothing left to run. A failure must stop the scenario, never
+    // be dressed up as a success.
+    const converted = await this.client.post<Invoice>(`/quotes/${quote.id}/convert`);
+    if (!converted.commercialDraft || converted.commercialDraft.lines.length === 0) {
+      throw new Error(`quotes.convert returned a draft with no commercial operation (${converted.id})`);
     }
+    // Conversion produces a COMMERCIAL DRAFT: the quote's VAT was indicative, so
+    // the draft awaits its own decision (taxSource: null). Phase D decides THAT
+    // operation, binds the decision to THAT document, then
+    // finalise — jamais une seconde facture.
+    ctx.convertedInvoiceId = converted.id;
+    ctx.convertedDraft = converted.commercialDraft;
+    ctx.convertedIssuedOn = converted.dates?.issued ?? null;
+    detail(`commercial draft from the quote: ${converted.id} (not decided yet)`);
 
-    // C.8 — validate.run: dry-run EN16931 validation BEFORE creating anything.
-    step('validate.run → POST /validate (validation amont, rien émis)');
+    // C.8 — validate.run: EN16931 dry-run. Even the dry-run is decision-first:
+    // the decision is taken first; the validation persists nothing and does not
+    // consume the decision — phase D reuses it.
+    step('taxDecisions.create + validate.run → POST /validate (nothing issued)');
     try {
-      const validation = await this.client.post<{ valid?: boolean; errors?: unknown[] }>(
-        '/validate',
-        this.sampleInvoicePayload(customerId),
-      );
-      detail(`valid=${validation.valid ?? '?'} errors=${validation.errors?.length ?? 0}`);
+      const decision = await this.decideMainOperation(ctx, customerId);
+      if (decision !== null) {
+        const validation = await this.client.post<{ valid?: boolean; errors?: unknown[] }>(
+          '/validate',
+          this.invoicePayloadFromDecision(customerId, decision.id),
+        );
+        detail(`valid=${validation.valid ?? '?'} errors=${validation.errors?.length ?? 0}`);
+      }
     } catch (err) {
       this.softError('validate.run', err);
     }
@@ -467,22 +568,43 @@ export class Scenario {
     phase('D', 'Cycle de vie facture');
     const customerId = this.requireCustomer(ctx);
 
-    // D.9 — Create (or reuse the draft from C.convert), then finalize.
-    if (!ctx.invoiceId) {
-      step('invoices.create → POST /invoices');
-      const invoice = await this.client.post<Invoice>(
-        '/invoices',
-        this.sampleInvoicePayload(customerId),
-        this.idem('invoice', customerId, this.today()),
-      );
-      ctx.invoiceId = invoice.id;
-      detail(`invoice=${invoice.id} status=${invoice.status}`);
-    } else {
-      detail(`réutilise le brouillon converti depuis le devis: ${ctx.invoiceId}`);
+    // D.9 — La facture est celle que le DEVIS a produite. Son bloc commercial
+    // block is read back from the conversion: the line references are assigned
+    // server-side, and the decision must state exactly the operation the draft
+    // carries. The decision is then BOUND to that same document — creating a
+    // second one would leave the converted draft orphaned.
+    const convertedId = ctx.convertedInvoiceId;
+    const draft = ctx.convertedDraft;
+    const issuedOn = ctx.convertedIssuedOn;
+    if (!convertedId || !draft || !issuedOn) {
+      throw new Error('aucun brouillon converti : le cycle devis ne peut pas se poursuivre');
     }
+
+    step('taxDecisions.create → POST /tax-decisions (operation of the converted draft)');
+    const decision = await this.decideConvertedDraft(customerId, draft, issuedOn);
+    if (decision === null) {
+      throw new Error(`the operation of draft ${convertedId} is not decidable — no invoice is issued`);
+    }
+    ctx.mainDecisionId = decision.id;
+
+    step(`invoices.bindTaxDecision → POST /invoices/${convertedId}/bind-tax-decision`);
+    const invoice = await this.client.post<Invoice>(
+      `/invoices/${convertedId}/bind-tax-decision`,
+      {
+        taxDecisionId: decision.id,
+        decisionLines: draft.lines.map((line) => ({
+          taxLineRef: line.reference,
+          unit: line.unit,
+          ...(line.product ? { product: line.product } : {}),
+        })),
+      },
+      this.idem('bind-decision', convertedId),
+    );
+    ctx.invoiceId = invoice.id;
+    detail(`invoice=${invoice.id} status=${invoice.status} taxSource=${invoice.taxSource}`);
     const invoiceId = ctx.invoiceId;
 
-    step(`invoices.finalize → POST /invoices/${invoiceId}/finalize (numérotation)`);
+    step(`invoices.finalize → POST /invoices/${invoiceId}/finalize (numbering)`);
     try {
       const finalized = await this.client.post<Invoice>(
         `/invoices/${invoiceId}/finalize`,
@@ -491,7 +613,7 @@ export class Scenario {
         this.idem('finalize', invoiceId),
       );
       ctx.invoiceNumber = finalized.number ?? null;
-      detail(`numéro attribué: ${finalized.number ?? '(async)'}`);
+      detail(`number assigned: ${finalized.number ?? '(async)'}`);
     } catch (err) {
       this.softError('invoices.finalize', err);
     }
@@ -528,14 +650,14 @@ export class Scenario {
     await this.fetchDocumentMaybeAsync(`/invoices/${invoiceId}/xml`, { format: 'ubl' });
 
     // D.11 — Deposit to the PA.
-    step(`invoices.send → POST /invoices/${invoiceId}/send (dépôt PA)`);
+    step(`invoices.send → POST /invoices/${invoiceId}/send (deposit to the PA)`);
     try {
       await this.client.post(
         `/invoices/${invoiceId}/send`,
         undefined,
         this.idem('invoice.send', invoiceId),
       );
-      detail('déposée à la PA');
+      detail('deposited to the PA');
     } catch (err) {
       this.softError('invoices.send', err);
     }
@@ -551,7 +673,7 @@ export class Scenario {
         break;
       }
     }
-    detail('statut PA simulé → approved');
+    detail('PA status simulated → approved');
 
     // D.12 — Collection: payment link, portal link, then record a payment.
     step(`invoices.createPaymentLink → POST /invoices/${invoiceId}/payment-link (Stripe)`);
@@ -564,7 +686,7 @@ export class Scenario {
         },
         this.idem('payment-link', invoiceId),
       );
-      detail(`payment link: ${link.url ?? '(créé)'}`);
+      detail(`payment link: ${link.url ?? '(created)'}`);
     } catch (err) {
       this.softError('invoices.createPaymentLink', err);
     }
@@ -594,7 +716,7 @@ export class Scenario {
         },
         this.idem('payment', invoiceId, 'VIR-2026-0001'),
       );
-      detail('paiement partiel enregistré');
+      detail('partial payment recorded');
     } catch (err) {
       this.softError('payments.create', err);
     }
@@ -624,7 +746,7 @@ export class Scenario {
       const events = await this.client.list<Identified & { type?: string }>(
         `/invoices/${invoiceId}/events`,
       );
-      detail(`${events.data.length} évènement(s) sur la facture`);
+      detail(`${events.data.length} event(s) on the invoice`);
     } catch (err) {
       this.softError('invoices.listEvents', err);
     }
@@ -633,7 +755,7 @@ export class Scenario {
     step(`invoices.verify → GET /invoices/${invoiceId}/verify (hash chain)`);
     try {
       const verify = await this.client.get<{ verified?: boolean }>(`/invoices/${invoiceId}/verify`);
-      detail(`chaîne de hash valide=${verify.verified ?? '?'}`);
+      detail(`hash chain valid=${verify.verified ?? '?'}`);
     } catch (err) {
       this.softError('invoices.verify', err);
     }
@@ -660,17 +782,17 @@ export class Scenario {
     step(`invoices.clone → POST /invoices/${invoiceId}/clone`);
     try {
       const clone = await this.client.post<Invoice>(`/invoices/${invoiceId}/clone`);
-      detail(`clone créé: ${clone.id}`);
+      detail(`clone created: ${clone.id}`);
     } catch (err) {
       this.softError('invoices.clone', err);
     }
   }
 
   // ===========================================================================
-  // E. Abonnement récurrent (cœur SaaS)
+  // E. Recurring subscription (SaaS core)
   // ===========================================================================
   async phaseE(ctx: ScenarioContext): Promise<void> {
-    phase('E', 'Abonnement récurrent');
+    phase('E', 'Recurring subscription');
     const customerId = this.requireCustomer(ctx);
 
     step('recurringInvoices.create → POST /recurring-invoices (mensuel)');
@@ -684,9 +806,15 @@ export class Scenario {
           nextGenerationDate: this.addDays(30),
           autoFinalize: true,
           autoSend: false,
-          // The template is a regular invoice payload minus the dates the
-          // engine fills in per occurrence.
-          templateInvoice: this.sampleSubscriptionTemplate(ctx),
+          // `taxInputs` carries the operation and its fiscal source; every
+          // occurrence is decided on its own generation date.
+          taxInputs: this.sampleSubscriptionTaxInputs(ctx),
+          // Presentation and terms only — never a line.
+          templateInvoice: {
+            paymentMethod: 'sepa',
+            paymentTermsDays: 0,
+            notes: 'Abonnement mensuel — prélèvement SEPA.',
+          },
         },
         this.idem('recurring', customerId),
       );
@@ -727,33 +855,652 @@ export class Scenario {
   // ===========================================================================
   // F. Avoir (credit note)
   // ===========================================================================
-  async phaseF(ctx: ScenarioContext): Promise<void> {
-    phase('F', 'Avoir');
+  /**
+   * K — decision-first billing, on the raw HTTP contract.
+   *
+   * This phase is the reference for the exact wire shape: the path, the JSON
+   * body, the `Idempotency-Key` header and the fields read back. Everything an
+   * SDK would hide is visible here.
+   *
+   * The order is the point. The VAT and the exact amount to debit come from
+   * Facturino BEFORE anything is collected, and the decision id travels with
+   * the settlement so what was received can be checked against what was decided.
+   *
+   * Facturino imposes no payment service provider and no payment method. The
+   * flow below is provider-neutral: the decision id is carried in the payment
+   * REFERENCE, which every settlement has — a transfer, a direct debit, a
+   * cheque, cash, or a PSP capture. Two PSP variants are shown afterwards as
+   * examples; both are simulated locally, and no PSP is ever contacted.
+   */
+  async phaseK(ctx: ScenarioContext): Promise<void> {
+    phase('K', 'Decision-backed invoicing');
     const customerId = this.requireCustomer(ctx);
-    if (!ctx.invoiceId) {
-      warn('aucune facture en contexte — phase F ignorée');
+
+    // K.2 — Decide BEFORE any payment.
+    //
+    //   POST /v1/tax-decisions
+    //   Authorization: Bearer fac_test_…
+    //   Content-Type: application/json
+    //   Idempotency-Key: <stable per order>
+    step('taxDecisions.create → POST /tax-decisions');
+    let decision: TaxDecision | undefined;
+    try {
+      decision = await this.client.post<TaxDecision>(
+        '/tax-decisions',
+        {
+          // Facturino determines the VAT; `taxSource: "integration"` is the
+          // other journey, shown in phaseKIntegration.
+          taxSource: 'facturino',
+          customerId,
+          // Civil date: a timestamp is refused, because turning an instant into
+          // a civil date is a timezone decision that belongs to the caller.
+          effectiveAt: this.today(),
+          currency: 'eur',
+          priceMode: 'tax_exclusive',
+          lines: [
+            {
+              reference: 'abo-pro',
+              description: 'Abonnement plateforme (1 mois)',
+              // An online subscription is an electronically supplied service:
+              // it carries its own place-of-supply rules.
+              category: 'electronically_supplied_services',
+              rateCategory: 'standard',
+              unitAmount: 4900, // integer cents
+              quantity: '1', // decimal STRING, never a float
+            },
+          ],
+        },
+        this.idem('tax-decision', customerId),
+      );
+      ctx.taxDecisionId = decision.id;
+      detail(`decision=${decision.id} status=${decision.status}`);
+    } catch (err) {
+      this.fiscalError('taxDecisions.create', err);
       return;
     }
 
-    step('creditNotes.create → POST /credit-notes (lié à la facture)');
+    // K.3 — Stop unless the decision is final. `pending_verification` does not
+    // mean "nothing to charge": the amounts are null, not 0. On this MANDATORY
+    // journey a non-final decision is a blocking fiscal outcome — recorded so
+    // the run can never end on "Scenario complete".
+    if (decision.status !== 'final' || decision.amountToCharge === null) {
+      for (const issue of decision.issues ?? []) detail(`issue: ${issue.code} — ${issue.message}`);
+      detail(`decision status=${decision.status}: amounts are null (not zero) — nothing is charged and no invoice is issued`);
+      this.fiscalBlocked('taxDecisions.create', `decision is "${decision.status}", not "final"`);
+      return;
+    }
+
+    // K.4/K.5 — Collect exactly what was decided, and carry the decision id in
+    // the settlement REFERENCE. Every settlement has one: a transfer wording, a
+    // direct-debit mandate reference, a cheque number, a PSP charge id.
+    const amountToCharge = decision.amountToCharge;
+    const settlement = {
+      amount: amountToCharge,
+      currency: decision.currency,
+      // transfer, card, check, cash, direct_debit, sepa, paypal or other
+      method: 'transfer',
+      // The REAL reference of the movement — a transfer wording, a mandate
+      // reference, a cheque number, a PSP charge id. It is what reconciles the
+      // ledger entry with the bank statement, so it is never replaced by the
+      // decision id: the decision travels ALONGSIDE it, not instead of it.
+      reference: 'VIR/2026/000871',
+      taxDecisionId: decision.id,
+      paidAt: this.today(),
+    };
+    step('settlement (simulated) -> real reference + decision id alongside');
+    detail(
+      `amount=${settlement.amount} cents ${settlement.currency} | ` +
+        `method=${settlement.method} | reference=${settlement.reference} | ` +
+        `decision=${settlement.taxDecisionId}`,
+    );
+
+    // K.5b — OPTIONAL, for a PSP-collected payment. Two examples, nothing more:
+    // Facturino requires neither. Simulated locally — nothing is sent.
+    detail(
+      `optional PSP variants — stripe.metadata=${JSON.stringify({ facturino_tax_decision_id: decision.id })} | ` +
+        `paypal.custom_id=${decision.id} value=${(amountToCharge / 100).toFixed(2)}`,
+    );
+
+    // K.6 — Once settled, read the decision back from the reference carried
+    // with the payment.
+    //
+    //   GET /v1/tax-decisions/{id}
+    step('taxDecisions.retrieve → GET /tax-decisions/{id}');
+    let source: TaxDecision;
     try {
+      source = await this.client.get<TaxDecision>(`/tax-decisions/${settlement.taxDecisionId}`);
+    } catch (err) {
+      this.fiscalError('taxDecisions.retrieve', err);
+      return;
+    }
+
+    // K.7 — Verify amount, currency and buyer against the decision.
+    if (settlement.amount !== source.amountToCharge) {
+      this.fiscalError('verification', new Error('settled amount differs from the decision'));
+      return;
+    }
+    if (settlement.currency !== source.currency) {
+      this.fiscalError('verification', new Error('settled currency differs from the decision'));
+      return;
+    }
+    if (customerId !== source.customerId) {
+      this.fiscalError('verification', new Error('settled buyer differs from the decision'));
+      return;
+    }
+    detail('settlement matches the decision: amount, currency and buyer');
+
+    // K.8 — The invoice is backed by the decision. `lines` is refused here: the
+    // VAT comes from the decision, and `decisionLines` carries presentation only.
+    step('invoices.create → POST /invoices (taxDecisionId + decisionLines)');
+    let invoiceId: string;
+    try {
+      const draft = await this.client.post<Invoice>(
+        '/invoices',
+        {
+          customerId: source.customerId,
+          taxDecisionId: source.id,
+          decisionLines: [{ taxLineRef: 'abo-pro', unit: 'month' }],
+          buyer: this.decisionBuyerBlock(),
+          dates: { issued: this.today(), due: this.addDays(30) },
+          payment: this.decisionPaymentTerms(),
+        },
+        this.idem('decided-invoice', source.id),
+      );
+      invoiceId = draft.id;
+    } catch (err) {
+      this.fiscalError('invoices.create (decision-backed)', err);
+      return;
+    }
+
+    // K.9 — Finalize: the number is assigned and the content is fixed.
+    step('invoices.finalize → POST /invoices/{id}/finalize');
+    try {
+      const finalized = await this.client.post<Invoice>(
+        `/invoices/${invoiceId}/finalize`,
+        undefined,
+        this.idem('decided-invoice-finalize', invoiceId),
+      );
+      ctx.decidedInvoiceId = finalized.id;
+      detail(
+        `invoice=${finalized.number} taxSource=${finalized.taxSource} | ` +
+          `axes document=${finalized.documentStatus ?? finalized.status} ` +
+          `transmission=${finalized.transmissionStatus ?? 'not_applicable'} ` +
+          `payment=${finalized.paymentStatus ?? 'unpaid'}`,
+      );
+    } catch (err) {
+      this.fiscalError('invoices.finalize (decision-backed)', err);
+      return;
+    }
+
+    // K.10 — Send to the platform ONLY on the channel the decision states.
+    if (source.invoiceChannel === 'einvoicing') {
+      step('invoices.send → POST /invoices/{id}/send');
+      try {
+        await this.client.post(
+          `/invoices/${ctx.decidedInvoiceId}/send`,
+          undefined,
+          this.idem('decided-invoice-send', ctx.decidedInvoiceId ?? invoiceId),
+        );
+        detail('deposited on the platform (invoiceChannel = einvoicing)');
+      } catch (err) {
+        this.fiscalError('invoices.send (decision-backed)', err);
+      }
+    } else {
+      // Not a failure: the operation is simply outside the e-invoicing channel.
+      // Calling /send here would be refused, and rightly so.
+      step('decided channel != einvoicing -> no platform deposit');
+      detail(
+        `invoiceChannel=${source.invoiceChannel ?? 'none'} — any applicable obligation is handled through e-reporting`,
+      );
+    }
+
+    // K.11 — Record the REAL collection on the invoice, with its real date, its
+    // real method and the reference that carries the decision id. The payment
+    // axis moves; the transmission axis does not.
+    step('payments.create → POST /invoices/{id}/payments');
+    try {
+      await this.client.post(
+        `/invoices/${ctx.decidedInvoiceId ?? invoiceId}/payments`,
+        {
+          amount: settlement.amount,
+          method: settlement.method,
+          reference: settlement.reference,
+          paidAt: settlement.paidAt,
+        },
+        this.idem('decided-invoice-payment', ctx.decidedInvoiceId ?? invoiceId),
+      );
+      detail(`payment recorded - reference=${settlement.reference}`);
+    } catch (err) {
+      this.fiscalError('payments.create (decision-backed)', err);
+    }
+
+    // K.12 — Keep the reporting axes: they are the obligations, and they hold
+    // whether or not the invoice travelled the network.
+    step('reporting axes carried by the decision');
+    detail(
+      `transaction=${source.transactionReporting ?? 'none'} | payment=${source.paymentReporting ?? 'none'}` +
+        (source.foreignTaxReviewRequired ? ' | foreignTaxReviewRequired=true' : ''),
+    );
+    for (const reason of source.obligationReasons ?? []) {
+      detail(`  ${reason.axis}: ${reason.code} (${reason.reference})`);
+    }
+
+    await this.decidedCreditNote(ctx);
+    await this.decidedRecurring(customerId);
+    await this.decidedDeposit(ctx, customerId);
+    await this.integrationDecision(customerId);
+  }
+
+  /**
+   * K.12 — Credit a DECIDED invoice through `creditedLines`.
+   *
+   * The rate, the category, the VATEX code and the
+   * legal mention are inherited from the invoice's frozen snapshot.
+   */
+  private async decidedCreditNote(ctx: ScenarioContext): Promise<void> {
+    if (!ctx.decidedInvoiceId) return;
+
+    step('creditNotes.create → POST /credit-notes (creditedLines)');
+    try {
+      const creditNote = await this.client.post<CreditNote & { originalTaxDecisionId?: string }>(
+        '/credit-notes',
+        {
+          relatedInvoiceId: ctx.decidedInvoiceId,
+          creditNoteType: 'partial',
+          reasonCode: 'quality',
+          reason: 'Partial credit note on a decision-backed invoice',
+          // Either `quantity` or `amountTTC`, never both. Omitting both credits
+          // the line's whole remaining balance.
+          creditedLines: [{ taxLineRef: 'abo-pro', amountTTC: 1200 }],
+          dates: { issued: this.today() },
+        },
+        this.idem('decided-credit-note', ctx.decidedInvoiceId),
+      );
+      detail(`credit note=${creditNote.id} inherited decision=${creditNote.originalTaxDecisionId ?? ctx.taxDecisionId}`);
+    } catch (err) {
+      this.fiscalError('creditNotes.create (creditedLines)', err);
+    }
+  }
+
+  /**
+   * K.13 — A recurrence on the decided journey.
+   *
+   * `taxInputs` carries the OPERATION, not a decision: a recurrence never
+   * stores one, so each occurrence is decided on its own effective date.
+   */
+  private async decidedRecurring(customerId: string): Promise<void> {
+    step('recurringInvoices.create → POST /recurring-invoices (taxInputs)');
+    try {
+      const recurring = await this.client.post<RecurringInvoice>(
+        '/recurring-invoices',
+        {
+          customerId,
+          frequency: 'monthly',
+          startDate: this.today(),
+          nextGenerationDate: this.addDays(30),
+          taxInputs: {
+            taxSource: 'facturino',
+            priceMode: 'tax_exclusive',
+            lines: [
+              {
+                reference: 'abo-pro',
+                description: 'Abonnement plateforme (1 mois)',
+                category: 'electronically_supplied_services',
+                rateCategory: 'standard',
+                unitAmount: 4900,
+                quantity: '1',
+                unit: 'month',
+              },
+            ],
+          },
+          // `templateInvoice` carries the presentation and the terms —
+          // jamais une ligne, jamais un taux.
+          templateInvoice: { paymentMethod: 'transfer', paymentTermsDays: 30 },
+        },
+        this.idem('decided-recurring', customerId),
+      );
+      detail(`recurrence=${recurring.id} - every occurrence is decided on its own date`);
+    } catch (err) {
+      this.fiscalError('recurringInvoices.create (taxInputs)', err);
+    }
+  }
+
+  /**
+   * K.14 — The OTHER fiscal journey: the VAT is supplied by the integration.
+   *
+   * An ERP or an in-house rules engine that already determines the VAT declares
+   * it on the decision (`taxSource: "integration"`). Facturino validates the
+   * coherence of what is supplied and refuses any contradiction
+   * (`integration_vat_incoherent`) — il ne corrige jamais un taux en silence.
+   * The decision, the invoice and the reporting obligations work
+   * ensuite exactement comme sur la source `facturino` : les deux parcours
+   * are equal.
+   */
+  private async integrationDecision(customerId: string): Promise<void> {
+    step('taxDecisions.create -> POST /tax-decisions (taxSource=integration)');
+    let decision: TaxDecision;
+    try {
+      decision = await this.client.post<TaxDecision>(
+        '/tax-decisions',
+        {
+          taxSource: 'integration',
+          customerId,
+          effectiveAt: this.today(),
+          currency: 'eur',
+          priceMode: 'tax_exclusive',
+          lines: [
+            {
+              reference: 'conseil-integ',
+              description: 'Prestation de conseil (TVA fournie par l\u2019ERP)',
+              category: 'services',
+              unitAmount: 10000,
+              quantity: '1',
+              vatRate: 2000, // 20.00% — concluded by YOUR system, never corrected
+              vatCode: 'S',
+            },
+          ],
+        },
+        this.idem('integration-decision', customerId),
+      );
+    } catch (err) {
+      this.fiscalError('taxDecisions.create (integration)', err);
+      return;
+    }
+    if (decision.status !== 'final' || decision.amountToCharge === null) {
+      this.fiscalBlocked('taxDecisions.create (integration)', `decision is "${decision.status}", not "final"`);
+      return;
+    }
+    detail(`integration decision=${decision.id} amount=${decision.amountToCharge} taxSource=${decision.taxSource ?? 'integration'}`);
+
+    // The invoice is created from the decision exactly as on the facturino
+    // source — same contract, same axes, same obligation engine.
+    step('invoices.create -> POST /invoices (from the integration decision)');
+    try {
+      const draft = await this.client.post<Invoice>(
+        '/invoices',
+        {
+          customerId,
+          buyer: this.decisionBuyerBlock(),
+          taxDecisionId: decision.id,
+          decisionLines: [{ taxLineRef: 'conseil-integ', unit: 'unit' }],
+          dates: { issued: this.today(), due: this.addDays(30) },
+          payment: this.decisionPaymentTerms(),
+        },
+        this.idem('integration-invoice', decision.id),
+      );
+      const invoice = await this.client.post<Invoice>(
+        `/invoices/${draft.id}/finalize`,
+        undefined,
+        this.idem('integration-invoice-finalize', draft.id),
+      );
+      detail(`invoice=${invoice.number} taxSource=${invoice.taxSource}`);
+    } catch (err) {
+      this.fiscalError('invoices.create (integration)', err);
+      return;
+    }
+
+    // A contradiction is refused, never corrected: a positive rate cannot carry
+    // an exemption code.
+    step('taxDecisions.create -> integration_vat_incoherent refusal (demonstration)');
+    try {
+      await this.client.post<TaxDecision>(
+        '/tax-decisions',
+        {
+          taxSource: 'integration',
+          customerId,
+          effectiveAt: this.today(),
+          currency: 'eur',
+          priceMode: 'tax_exclusive',
+          lines: [
+            {
+              reference: 'incoherent',
+              description: 'Ligne incohérente (démonstration du refus)',
+              category: 'services',
+              unitAmount: 10000,
+              quantity: '1',
+              vatRate: 2000,
+              vatCode: 'S',
+              vatexCode: 'VATEX-EU-G',
+            },
+          ],
+        },
+        this.idem('integration-incoherent', customerId),
+      );
+      this.fiscalError('integration coherence', new Error('the contradiction was accepted; it must be refused'));
+    } catch {
+      detail('contradiction refused, never corrected (integration_vat_incoherent)');
+    }
+  }
+
+  /**
+   * K.11b — Deposit invoice (386), decided, invoiced and settled in full.
+   *
+   * The deposit is DECISION-BACKED, like everything else in this phase: it
+   * describes its operation, receives a decision, and is then created with
+   * `taxDecisionId` + `decisionLines`. A deposit states `category: "deposit"`
+   * with the `relatedCategory` it is an advance on — that is what lets the
+   * engine resolve its effective nature rather than guess it.
+   *
+   * The ORDER is the point: a deposit may only ever be deducted as PREPAID
+   * (BT-113), and an amount is only prepaid once it has actually been
+   * collected. The deposit is therefore decided, invoiced, and PAID IN FULL
+   * here, and only then deducted from the balance invoice: `deposits` and
+   * `schedule` settle SERVER-SIDE against the decided amount due.
+   */
+  private async decidedDeposit(ctx: ScenarioContext, customerId: string): Promise<void> {
+    // --- the deposit -------------------------------------------------------
+    step('taxDecisions.create -> POST /tax-decisions (deposit)');
+    let depositDecision: TaxDecision;
+    try {
+      depositDecision = await this.client.post<TaxDecision>(
+        '/tax-decisions',
+        {
+          taxSource: 'facturino',
+          customerId,
+          effectiveAt: this.today(),
+          currency: 'eur',
+          priceMode: 'tax_exclusive',
+          lines: [
+            {
+              reference: 'deposit',
+              description: 'Prestation d\u2019atelier \u2014 acompte',
+              // An advance on a service: the engine resolves the effective
+              // nature from `relatedCategory`, it does not infer it.
+              category: 'deposit',
+              relatedCategory: 'services',
+              rateCategory: 'standard',
+              unitAmount: 24000,
+              quantity: '1',
+            },
+          ],
+        },
+        this.idem('deposit-decision', customerId),
+      );
+    } catch (err) {
+      this.fiscalError('taxDecisions.create (deposit)', err);
+      return;
+    }
+    if (depositDecision.status !== 'final' || depositDecision.amountToCharge === null) {
+      for (const issue of depositDecision.issues ?? []) detail(`issue: ${issue.code} — ${issue.message}`);
+      detail(`deposit decision status=${depositDecision.status}: amounts are null (not zero) — nothing is invoiced`);
+      this.fiscalBlocked('taxDecisions.create (deposit)', `decision is "${depositDecision.status}", not "final"`);
+      return;
+    }
+    detail(`deposit decision=${depositDecision.id} amount=${depositDecision.amountToCharge}`);
+
+    step('invoices.create -> POST /invoices (type=deposit, taxDecisionId)');
+    let depositId: string;
+    try {
+      const draft = await this.client.post<Invoice>(
+        '/invoices',
+        {
+          type: 'deposit',
+          customerId,
+          buyer: this.decisionBuyerBlock(),
+          taxDecisionId: depositDecision.id,
+          // Presentation only: the VAT comes from the decision.
+          decisionLines: [{ taxLineRef: 'deposit', unit: 'unit' }],
+          dates: { issued: this.today(), due: this.addDays(30) },
+          payment: this.decisionPaymentTerms(),
+        },
+        this.idem('deposit-draft', customerId),
+      );
+      const deposit = await this.client.post<Invoice>(
+        `/invoices/${draft.id}/finalize`,
+        undefined,
+        this.idem('deposit-finalize', draft.id),
+      );
+      depositId = deposit.id;
+      ctx.depositInvoiceId = deposit.id;
+      detail(`deposit=${deposit.number} invoiced`);
+    } catch (err) {
+      this.fiscalError('invoices.create (deposit)', err);
+      return;
+    }
+
+    // Record the payment IN FULL. Until this happens the deposit is not
+    // prepaid, and must not be deducted from anything.
+    step('payments.create -> POST /invoices/{deposit}/payments (settled in full)');
+    try {
+      await this.client.post(
+        `/invoices/${depositId}/payments`,
+        {
+          amount: depositDecision.amountToCharge,
+          method: 'transfer',
+          // The real bank reference of the movement, not the decision id.
+          reference: 'VIR/2026/000872',
+          paidAt: this.today(),
+        },
+        this.idem('deposit-payment', depositId),
+      );
+      const settled = await this.client.get<Invoice>(`/invoices/${depositId}`);
+      if ((settled.paymentStatus ?? settled.status) !== 'paid') {
+        // Deducting an unsettled deposit anywhere would misstate BT-113.
+        detail('deposit unpaid: it must not be deducted from any balance invoice');
+        return;
+      }
+      detail('deposit settled - it may now be deducted as prepaid (BT-113)');
+    } catch (err) {
+      this.fiscalError('payments.create (deposit)', err);
+      return;
+    }
+
+    // --- the balance invoice: deposit deducted + instalments ----------------
+    //
+    // `deposits` and `schedule` travel WITH the decision and settle
+    // SERVER-SIDE against the decided amount: the settled deposit seeds
+    // `amountPaid` (BT-113) and lowers `amountDue` (BT-115), and the
+    // instalments must distribute exactly what remains due — the last one on
+    // the invoice due date (BT-9).
+    step('taxDecisions.create -> POST /tax-decisions (balance)');
+    let balanceDecision: TaxDecision;
+    try {
+      balanceDecision = await this.client.post<TaxDecision>(
+        '/tax-decisions',
+        {
+          taxSource: 'facturino',
+          customerId,
+          effectiveAt: this.today(),
+          currency: 'eur',
+          priceMode: 'tax_exclusive',
+          lines: [
+            {
+              reference: 'prestation-atelier',
+              description: 'Prestation d\u2019atelier',
+              category: 'services',
+              rateCategory: 'standard',
+              unitAmount: 8000,
+              quantity: '10',
+            },
+          ],
+        },
+        this.idem('balance-decision', customerId),
+      );
+    } catch (err) {
+      this.fiscalError('taxDecisions.create (balance)', err);
+      return;
+    }
+    if (balanceDecision.status !== 'final' || balanceDecision.amountToCharge === null) {
+      this.fiscalBlocked('taxDecisions.create (balance)', `decision is "${balanceDecision.status}", not "final"`);
+      return;
+    }
+
+    step('invoices.create -> POST /invoices (balance: deposits + schedule, settled server-side)');
+    try {
+      const stillDue = balanceDecision.amountToCharge - depositDecision.amountToCharge;
+      const firstInstalment = Math.floor(stillDue / 2);
+      const draft = await this.client.post<Invoice>(
+        '/invoices',
+        {
+          customerId,
+          buyer: this.decisionBuyerBlock(),
+          taxDecisionId: balanceDecision.id,
+          decisionLines: [{ taxLineRef: 'prestation-atelier', unit: 'hour' }],
+          dates: { issued: this.today(), due: this.addDays(30) },
+          payment: this.decisionPaymentTerms(),
+          deposits: [{ invoiceId: depositId }],
+          schedule: [
+            { amount: firstInstalment, dueDate: this.addDays(15), label: 'Premier versement' },
+            { amount: stillDue - firstInstalment, dueDate: this.addDays(30), label: 'Solde' },
+          ],
+        },
+        this.idem('balance-draft', depositId),
+      );
+      const balance = await this.client.post<Invoice>(
+        `/invoices/${draft.id}/finalize`,
+        undefined,
+        this.idem('balance-finalize', draft.id),
+      );
+      detail(
+        `balance=${balance.number} | prepaid=${balance.totals?.amountPaid ?? '?'} | due=${balance.totals?.amountDue ?? '?'}`,
+      );
+    } catch (err) {
+      this.fiscalError('invoices.create (balance)', err);
+    }
+  }
+
+  /** Buyer block (BG-7) used by the decision-backed documents. */
+  private decisionBuyerBlock(): unknown {
+    return {
+      companyName: 'Café des Artisans SARL',
+      siret: '55208131766522',
+      vatNumber: 'FR40552081317',
+      address: { line1: '12 rue des Lilas', postalCode: '75011', city: 'Paris', country: 'FR' },
+    };
+  }
+
+  /** Payment terms (BT-20) used by the decision-backed documents. */
+  private decisionPaymentTerms(): unknown {
+    return {
+      terms: 'Paiement à 30 jours par virement',
+      termsDays: 30,
+      method: 'transfer',
+      latePaymentRate: '3 fois le taux légal',
+      collectionFee: '40 €',
+    };
+  }
+
+  async phaseF(ctx: ScenarioContext): Promise<void> {
+    phase('F', 'Avoir');
+    if (!ctx.invoiceId) {
+      warn('no invoice in context — phase F skipped');
+      return;
+    }
+
+    step('creditNotes.create → POST /credit-notes (creditedLines)');
+    try {
+      // `creditedLines` references the DECIDED lines of the invoice: the rate,
+      // the category, the VATEX code and the legal mention are inherited from
+      // the frozen snapshot, never restated. `amountTTC` credits a fraction.
       const creditNote = await this.client.post<CreditNote>(
         '/credit-notes',
         {
-          customerId,
           relatedInvoiceId: ctx.invoiceId,
           creditNoteType: 'partial',
           reasonCode: 'quality',
           reason: 'Geste commercial — 1 heure offerte',
-          items: [
-            {
-              description: 'Remboursement 1h de conseil',
-              quantity: '1',
-              unitPrice: 13000, // 130,00 €
-              vatRate: 2000,
-              vatCode: 'S',
-              unit: 'hour',
-            },
+          creditedLines: [
+            { taxLineRef: 'conseil-heure', amountTTC: 15600 }, // 130,00 € HT + TVA
           ],
           dates: { issued: this.today() },
         },
@@ -783,7 +1530,7 @@ export class Scenario {
         .get(`/credit-notes/${id}/facturx`)
         .catch((e) => this.softError('creditNotes.getFacturx', e));
 
-      // invoices.get avec expand=credit_notes: récupère les avoirs liés et le
+      // invoices.get with expand=credit_notes: fetches the linked credit notes and the
       // solde net de la facture (TTC − avoirs) en un seul appel.
       step(`invoices.get (expand) → GET /invoices/${ctx.invoiceId}?expand=credit_notes`);
       try {
@@ -792,7 +1539,7 @@ export class Scenario {
         });
         const linked = invoice.expanded?.credit_notes ?? [];
         detail(
-          `${linked.length} avoir(s) lié(s) · solde net = ${invoice.expanded?.net_balance ?? '?'} €`,
+          `${linked.length} linked credit note(s) · net balance = ${invoice.expanded?.net_balance ?? '?'} EUR`,
         );
       } catch (err) {
         this.softError('invoices.get (expand=credit_notes)', err);
@@ -801,10 +1548,10 @@ export class Scenario {
   }
 
   // ===========================================================================
-  // G. Achats (factures reçues)
+  // G. Purchases and received invoices
   // ===========================================================================
   async phaseG(ctx: ScenarioContext): Promise<void> {
-    phase('G', 'Achats (factures reçues)');
+    phase('G', 'Purchases and received invoices');
 
     step('invoices.createIncoming → POST /invoices/incoming');
     try {
@@ -821,7 +1568,7 @@ export class Scenario {
       );
       // Drive the lifecycle (approve / record payment) on this fresh invoice.
       if (incoming.id) ctx.receivedInvoiceId = incoming.id;
-      detail(`facture entrante enregistrée: ${incoming.id ?? '(sans id)'}`);
+      detail(`incoming invoice recorded: ${incoming.id ?? '(no id)'}`);
     } catch (err) {
       this.softError('invoices.createIncoming', err);
     }
@@ -840,7 +1587,7 @@ export class Scenario {
       // Prefer the invoice we just created above; fall back to the first listed.
       const firstReceived = received.data[0]?.id;
       if (!ctx.receivedInvoiceId && firstReceived) ctx.receivedInvoiceId = firstReceived;
-      detail(`${received.data.length} facture(s) reçue(s)`);
+      detail(`${received.data.length} received invoice(s)`);
     } catch (err) {
       this.softError('receivedInvoices.list', err);
     }
@@ -866,7 +1613,7 @@ export class Scenario {
         step(`receivedInvoices.refuse → POST /received-invoices/${id}/refuse`);
         await this.client.post(`/received-invoices/${id}/refuse`).catch((e) => this.softError('refuse', e));
       } else {
-        warn('receivedInvoices.suspend/refuse codés mais ignorés (ALLOW_DESTRUCTIVE=1 pour activer)');
+        warn('receivedInvoices.suspend/refuse coded but skipped (set ALLOW_DESTRUCTIVE=1 to enable)');
       }
 
       step(`receivedInvoices.recordPayment → POST /received-invoices/${id}/record-payment`);
@@ -924,7 +1671,7 @@ export class Scenario {
         this.softError('webhookEndpoints.create', err);
       }
     } else {
-      detail(`endpoint existant réutilisé: ${endpointId}`);
+      detail(`reused existing endpoint: ${endpointId}`);
     }
     if (endpointId) ctx.webhookEndpointId = endpointId;
 
@@ -932,7 +1679,7 @@ export class Scenario {
       step(`webhookEndpoints.test → POST /webhook-endpoints/${endpointId}/test`);
       try {
         await this.client.post(`/webhook-endpoints/${endpointId}/test`);
-        detail('ping de test envoyé — voir les logs /webhooks');
+        detail('test ping sent — see the /webhooks logs');
       } catch (err) {
         this.softError('webhookEndpoints.test', err);
       }
@@ -946,7 +1693,7 @@ export class Scenario {
         limit: 10,
       });
       firstEventId = events.data[0]?.id;
-      detail(`${events.data.length} évènement(s) récents`);
+      detail(`${events.data.length} recent event(s)`);
     } catch (err) {
       this.softError('events.list', err);
     }
@@ -963,10 +1710,10 @@ export class Scenario {
   }
 
   // ===========================================================================
-  // I. Comptabilité & pilotage
+  // I. Accounting and reporting
   // ===========================================================================
   async phaseI(ctx: ScenarioContext): Promise<void> {
-    phase('I', 'Comptabilité & pilotage');
+    phase('I', 'Accounting and reporting');
     void ctx;
 
     const periodStart = `${new Date().getFullYear()}-01-01`;
@@ -1031,7 +1778,7 @@ export class Scenario {
         this.idem('ereporting', period),
       );
       declarationId = declaration.id;
-      detail(`déclaration=${declaration.id}`);
+      detail(`declaration=${declaration.id}`);
     } catch (err) {
       this.softError('ereporting.createDeclaration', err);
     }
@@ -1051,7 +1798,7 @@ export class Scenario {
           .post(`/ereporting/declarations/${declarationId}/submit`)
           .catch((e) => this.softError('ereporting.submit', e));
       } else {
-        warn('ereporting.submit codé mais ignoré (transmet à la DGFiP — ALLOW_DESTRUCTIVE=1)');
+        warn('ereporting.submit coded but skipped (it transmits to the DGFiP — ALLOW_DESTRUCTIVE=1)');
       }
     }
 
@@ -1163,7 +1910,7 @@ export class Scenario {
       );
       const jobId = res?.jobId ?? res?.job_id;
       if (jobId) {
-        detail(`génération asynchrone → jobs.poll(${jobId})`);
+        detail(`asynchronous generation → jobs.poll(${jobId})`);
         await this.pollJob(jobId);
       } else {
         detail('document disponible');
@@ -1178,23 +1925,118 @@ export class Scenario {
     for (let i = 0; i < 10; i++) {
       const job = await this.client.get<Job>(`/jobs/${jobId}`);
       if (job.status === 'completed' || job.status === 'succeeded') {
-        detail(`job ${jobId} terminé`);
+        detail(`job ${jobId} finished`);
         return;
       }
       if (job.status === 'failed') {
-        fail(`job ${jobId} échoué`);
+        fail(`job ${jobId} failed`);
         return;
       }
       await new Promise((r) => setTimeout(r, 1000));
     }
-    warn(`job ${jobId} toujours en cours après le délai imparti`);
+    warn(`job ${jobId} still running after the allotted time`);
   }
 
-  /** A complete, EN16931-shaped invoice payload (reused by create + validate). */
-  private sampleInvoicePayload(customerId: string): unknown {
+  /**
+   * Decides (source `facturino`) the main commercial operation: the lines
+   * DESCRIBE the operation and never state a rate. A decision already taken
+   * (C.8) is reused — the endpoint is idempotent and the
+   * validation ne la consomme pas.
+   */
+  /**
+   * Decides the operation a commercial draft states — same references, same
+   * amounts, no VAT restated by the client. `effectiveAt` is the issue date OF
+   * THE DRAFT: a decision dated elsewhere describes another operation and is
+   * refused at binding.
+   */
+  private async decideConvertedDraft(
+    customerId: string,
+    draft: CommercialDraft,
+    effectiveAt: string,
+  ): Promise<TaxDecision | null> {
+    const decision = await this.client.post<TaxDecision>(
+      '/tax-decisions',
+      {
+        taxSource: 'facturino',
+        customerId,
+        effectiveAt,
+        currency: 'eur',
+        priceMode: draft.priceMode,
+        lines: draft.lines.map((line) => ({
+          reference: line.reference,
+          description: line.description,
+          category: line.supplyCategory,
+          rateCategory: line.rateCategory,
+          unitAmount: line.unitPrice,
+          quantity: line.quantity,
+          ...(line.discount ? { discount: line.discount } : {}),
+        })),
+      },
+      this.idem('decision.converted-draft', customerId, effectiveAt),
+    );
+    if (decision.status !== 'final' || decision.amountToCharge === null) {
+      for (const issue of decision.issues ?? []) warn(`manquant: ${issue.code} — ${issue.message}`);
+      return null;
+    }
+    return decision;
+  }
+
+  private async decideMainOperation(
+    ctx: ScenarioContext,
+    customerId: string,
+  ): Promise<TaxDecision | null> {
+    if (ctx.mainDecisionId) {
+      return this.client.get<TaxDecision>(`/tax-decisions/${ctx.mainDecisionId}`);
+    }
+    const decision = await this.client.post<TaxDecision>(
+      '/tax-decisions',
+      {
+        taxSource: 'facturino',
+        customerId,
+        effectiveAt: this.today(),
+        currency: 'eur',
+        priceMode: 'tax_exclusive',
+        lines: [
+          {
+            reference: 'conseil-heure',
+            description: 'Prestation de conseil',
+            category: 'services',
+            rateCategory: 'standard',
+            unitAmount: 13000, // 130,00 €/h
+            quantity: '8',
+          },
+          {
+            reference: 'abo-plateforme',
+            description: 'Abonnement plateforme (1 mois)',
+            category: 'electronically_supplied_services',
+            rateCategory: 'standard',
+            unitAmount: 4900, // 49,00 €
+            quantity: '1',
+            discount: { type: 'percent', value: 1000 }, // 10,00 % de remise
+          },
+        ],
+      },
+      this.idem('main-decision', customerId),
+    );
+    if (decision.status !== 'final' || decision.amountToCharge === null) {
+      for (const issue of decision.issues ?? []) detail(`issue: ${issue.code} — ${issue.message}`);
+      return null;
+    }
+    ctx.mainDecisionId = decision.id;
+    return decision;
+  }
+
+  /** The decision-backed invoice payload (reused by create + validate). */
+  private invoicePayloadFromDecision(customerId: string, taxDecisionId: string): unknown {
     return {
       type: 'standard',
       customerId,
+      taxDecisionId,
+      // Presentation only: the VAT comes from the decision.
+      decisionLines: [
+        { taxLineRef: 'conseil-heure', unit: 'hour' },
+        { taxLineRef: 'abo-plateforme', unit: 'month' },
+      ],
       // BG-7 buyer block — SIRET (BT-46) + delivery address.
       buyer: {
         companyName: 'Café des Artisans SARL',
@@ -1208,25 +2050,6 @@ export class Scenario {
           country: 'FR',
         },
       },
-      lines: [
-        {
-          description: 'Prestation de conseil',
-          quantity: '8',
-          unitPrice: 13000, // 130,00 €/h
-          vatRate: 2000, // 20,00 %
-          vatCode: 'S',
-          unit: 'hour',
-        },
-        {
-          description: 'Abonnement plateforme (1 mois)',
-          quantity: '1',
-          unitPrice: 4900, // 49,00 €
-          vatRate: 2000,
-          vatCode: 'S',
-          unit: 'month',
-          discountPercent: 1000, // 10,00 % de remise
-        },
-      ],
       dates: { issued: this.today(), due: this.addDays(30) },
       payment: {
         terms: 'Paiement à 30 jours par virement',
@@ -1242,25 +2065,23 @@ export class Scenario {
     };
   }
 
-  /** A subscription template invoice for the recurring engine (no dates). */
-  private sampleSubscriptionTemplate(ctx: ScenarioContext): unknown {
-    // templateInvoice carries the line items the recurring engine repeats each
-    // period; the customer, dates and numbering are resolved per occurrence.
+  /** The fiscal inputs of the recurring subscription (decided per occurrence). */
+  private sampleSubscriptionTaxInputs(ctx: ScenarioContext): unknown {
     return {
-      items: [
+      taxSource: 'facturino',
+      priceMode: 'tax_exclusive',
+      lines: [
         {
+          reference: 'abo-mensuel',
           description: 'Abonnement Atelier — mensuel',
+          category: 'electronically_supplied_services',
+          rateCategory: 'standard',
+          unitAmount: 4900,
           quantity: '1',
-          unitPrice: 4900,
-          vatRate: 2000,
-          vatCode: 'S',
           unit: 'month',
           ...(ctx.subscriptionProductId ? { product: ctx.subscriptionProductId } : {}),
         },
       ],
-      paymentMethod: 'sepa',
-      paymentTermsDays: 0,
-      notes: 'Abonnement mensuel — prélèvement SEPA.',
     };
   }
 
@@ -1277,9 +2098,33 @@ export class Scenario {
   }
 
   /**
-   * Log a non-fatal error and keep going. The scenario touches dozens of
-   * endpoints; a plan-gated or state-machine-conflicting call shouldn't abort
-   * the whole walkthrough. Always surfaces `request_id` for support.
+   * Log a MANDATORY fiscal-journey failure. Unlike `softError`, these are
+   * blocking: the phase stops where it failed, and `runAll` refuses to declare
+   * the scenario complete. The decision-first journey is the point of this
+   * demo — an error inside it is never an optional feature being unavailable.
+   */
+  private fiscalError(operation: string, err: unknown): void {
+    this.fiscalFailures.push(operation);
+    this.softError(operation, err);
+  }
+
+  /**
+   * Record a BUSINESS block on the mandatory fiscal journey: the call itself
+   * succeeded, but the decision is not `final`, so the journey cannot reach
+   * its end. Distinct from `fiscalError` (a technical failure): the amounts of
+   * a `pending_verification` decision are null — NOT zero — and nothing may be
+   * charged or invoiced until the missing facts are supplied and re-decided.
+   */
+  private fiscalBlocked(operation: string, reason: string): void {
+    this.fiscalFailures.push(`${operation} [business block: ${reason}]`);
+    fail(`${operation}: blocked — ${reason} (not a technical failure)`);
+  }
+
+  /**
+   * Log a non-fatal error and keep going. Reserved for explicitly OPTIONAL
+   * features (plan-gated endpoints, state-machine conflicts on side quests):
+   * their absence shouldn't abort the whole walkthrough. Always surfaces
+   * `request_id` for support. Mandatory fiscal steps use `fiscalError`.
    */
   private softError(operation: string, err: unknown): void {
     if (err instanceof FacturinoError) {

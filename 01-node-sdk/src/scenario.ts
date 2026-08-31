@@ -9,6 +9,9 @@ import type {
   Quote,
   CreditNote,
   InvoiceLineItemParam,
+  TaxDecision,
+  TaxDecisionLineParam,
+  DecisionBackedLineParam,
   DocumentUrlResponse,
   JobResponse,
 } from '@facturino/node'
@@ -17,7 +20,7 @@ import type { Config } from './config.js'
 import { describeError, eur, idempotencyKey, isJobResponse, isoDate, isoDateTime, currentPeriod, log } from './lib.js'
 
 /**
- * The shared "Atelier Dupont" scenario, end to end (steps A→J of
+ * The shared "Atelier Dupont" scenario, end to end (steps A→K of
  * docs/SCENARIO.md), driven through the official `@facturino/node` SDK.
  *
  * Design choices:
@@ -246,14 +249,19 @@ export class Scenario {
     return { draft, quoteId: quote.id }
   }
 
-  /** C.8 — Upstream validation: run EN16931 validation on a payload without emitting. */
+  /** C.8 — Upstream validation: decide, then dry-run the payload without emitting. */
   async validateUpstream(customer: Customer, service: Product): Promise<void> {
     log.step('C', 'Upstream validation (validate.run)')
 
-    // Dry-run the full invoice payload against EN16931 + CIUS-FR before
-    // creating anything — nothing is persisted. (The customer's SIRET/VAT were
-    // already resolved upstream via customers.lookup in the catalogue step.)
-    const invoicePayload = this.invoiceCreateBody(customer, [this.serviceLine(service, '2')])
+    // Even a dry-run is decision-first: the payload references a decision, so
+    // the decision is taken before anything is validated — and the validation
+    // persists nothing. The decision is idempotent, so the invoice phase can
+    // reuse it if the same operation is created for real later.
+    const decision = await this.decide(customer, [this.serviceDecisionLine('2')], 'validate', service.id)
+    if (!decision) return
+    const invoicePayload = this.invoiceBodyFromDecision(customer, decision.id, [
+      { taxLineRef: 'svc-heure', unit: 'hour', product: service.id },
+    ])
     const result = await this.f.validate.run(invoicePayload)
     log.ok(`Invoice payload valid=${result.valid}, ${result.warnings.length} warning(s)`)
   }
@@ -263,14 +271,17 @@ export class Scenario {
   // ---------------------------------------------------------------------------
 
   /**
-   * D.9 → D.15 — finalize, fetch documents, deposit to PA, take payment,
-   * remind, audit, clone. Uses the draft produced by the quote conversion;
-   * if it carries no usable lines, falls back to a fresh draft.
+   * D.9 → D.15 — decide, bind, finalize, fetch documents, deposit to PA, take
+   * payment, remind, audit, clone.
+   *
+   * The invoice is the one the QUOTE produced: the decision is bound to that
+   * same commercial draft. The cycle is convert → decide → bind → finalize on
+   * ONE document — a second invoice would leave the converted draft orphaned
+   * and break the quote lineage.
    */
   async invoiceLifecycle(
     company: Company,
     customer: Customer,
-    subscription: Product,
     draftFromQuote: Invoice,
     sourceQuoteId: string,
   ): Promise<Invoice> {
@@ -280,16 +291,45 @@ export class Scenario {
     const fromQuote = await this.f.invoices.list({ convertedFrom: sourceQuoteId, limit: 5 })
     log.info(`invoices.list convertedFrom=${sourceQuoteId}: ${fromQuote.data.length} invoice(s)`)
 
-    // D.9 — Create a fresh invoice carrying both buyer detail (BG-7) and a
-    // purchase order number (BT-13), so finalization is fully populated.
-    let invoice = await this.f.invoices.create(
-      this.invoiceCreateBody(customer, [this.subscriptionLine(subscription)], {
-        purchaseOrderNumber: 'PO-2026-0042',
-        notes: 'Facture démo Atelier Dupont',
-      }),
-      { idempotencyKey: idempotencyKey('invoice', customer.id, subscription.id) },
+    // D.9 — Decide the operation the CONVERTED DRAFT states, then bind the
+    // decision to that same invoice. The commercial block is read back from the
+    // draft: its line references are server-assigned at conversion, and the
+    // decision must state exactly the operation the draft carries.
+    const commercial = draftFromQuote.commercialDraft
+    if (!commercial || commercial.lines.length === 0) {
+      throw new Error(
+        `converted draft ${draftFromQuote.id} carries no commercial operation — the quote cycle cannot continue`,
+      )
+    }
+    const decision = await this.decide(
+      customer,
+      commercial.lines.map((line) => ({
+        reference: line.reference,
+        description: line.description,
+        category: line.supplyCategory,
+        rateCategory: line.rateCategory,
+        unitAmount: line.unitPrice,
+        quantity: line.quantity,
+        ...(line.discount ? { discount: line.discount } : {}),
+      })),
+      'quote-invoice', draftFromQuote.id,
     )
-    log.ok(`Draft invoice ${invoice.id} (${invoice.status}); quote draft was ${draftFromQuote.id}`)
+    if (!decision) {
+      throw new Error(`the operation of draft ${draftFromQuote.id} is not decidable — no invoice is issued`)
+    }
+    let invoice = await this.f.invoices.bindTaxDecision(
+      draftFromQuote.id,
+      {
+        taxDecisionId: decision.id,
+        decisionLines: commercial.lines.map((line) => ({
+          taxLineRef: line.reference,
+          unit: line.unit,
+          ...(line.product ? { product: line.product } : {}),
+        })),
+      },
+      { idempotencyKey: idempotencyKey('bind-decision', draftFromQuote.id) },
+    )
+    log.ok(`Decision ${decision.id} bound to the converted draft ${invoice.id} (${invoice.status})`)
 
     invoice = await this.f.invoices.finalize(invoice.id, {
       idempotencyKey: idempotencyKey('invoice-finalize', invoice.id),
@@ -410,6 +450,9 @@ export class Scenario {
   async recurring(customer: Customer, subscription: Product): Promise<void> {
     log.step('E', 'Recurring subscription')
 
+    // `taxInputs` carries the OPERATION and its fiscal source; each occurrence
+    // is decided on its own generation date. `templateInvoice` carries
+    // presentation and terms only — never a line, never a rate.
     const recurring = await this.f.recurringInvoices.create(
       {
         customerId: customer.id,
@@ -418,8 +461,16 @@ export class Scenario {
         nextGenerationDate: isoDate(30),
         autoFinalize: true,
         autoSend: false,
+        taxInputs: {
+          taxSource: 'facturino',
+          priceMode: 'tax_exclusive',
+          lines: [{
+            ...this.subscriptionDecisionLine(subscription),
+            unit: 'month',
+            product: subscription.id,
+          }],
+        },
         templateInvoice: {
-          items: [this.subscriptionLine(subscription)],
           paymentMethod: 'transfer',
           paymentTermsDays: 30,
           notes: 'Abonnement mensuel Atelier Dupont',
@@ -447,14 +498,16 @@ export class Scenario {
 
     let creditNote: CreditNote
     try {
+      // `creditedLines` references the invoice's DECIDED lines: the rate, the
+      // category, the VATEX code and the legal mention are inherited from the
+      // frozen snapshot, never restated. `amountTTC` credits a fraction.
       creditNote = await this.f.creditNotes.create(
         {
-          customerId: customer.id,
           relatedInvoiceId: invoice.id,
           creditNoteType: 'partial',
           reasonCode: 'quality',
-          reason: 'Geste commercial — heure de prestation offerte',
-          items: [this.serviceLine(service, '1')],
+          reason: 'Geste commercial — remise sur l’abonnement',
+          creditedLines: [{ taxLineRef: 'abo-mensuel', amountTTC: 1188 }],
           dates: { issued: isoDate() },
         },
         { idempotencyKey: idempotencyKey('credit-note', invoice.id) },
@@ -465,6 +518,8 @@ export class Scenario {
       log.warn(`creditNotes.create: ${describeError(err)}`)
       return
     }
+    void customer
+    void service
 
     try {
       const finalized = await this.f.creditNotes.finalize(creditNote.id, {
@@ -737,7 +792,7 @@ export class Scenario {
   // ---------------------------------------------------------------------------
 
   /**
-   * Exercises every remaining business endpoint not already shown in A→J, so the
+   * Exercises every remaining business endpoint not already shown in A→K, so the
    * demo doubles as an exhaustive, runnable reference for the SDK. Throwaway
    * resources are created then deleted; each block is independent so an
    * unsupported operation (e.g. a plan-gated feature, or an empty PA inbox)
@@ -828,9 +883,15 @@ export class Scenario {
       const list = await this.f.creditNotes.list({ limit: 5 })
       log.info(`creditNotes.list: ${list.data.length} item(s)`)
 
+      const cnDecision = await this.decide(
+        customer, [this.serviceDecisionLine('1')], 'cov-cn', `${Date.now()}`,
+      )
+      if (!cnDecision) throw new Error('coverage decision is not final')
       const cnInvoiceDraft = await this.f.invoices.create(
-        this.invoiceCreateBody(customer, [this.serviceLine(service, '1')]),
-        { idempotencyKey: idempotencyKey('cov-cn-invoice', `${Date.now()}`) },
+        this.invoiceBodyFromDecision(customer, cnDecision.id, [
+          { taxLineRef: 'svc-heure', unit: 'hour', product: service.id },
+        ]),
+        { idempotencyKey: idempotencyKey('cov-cn-invoice', cnDecision.id) },
       )
       const cnInvoice = await this.f.invoices.finalize(cnInvoiceDraft.id, {
         idempotencyKey: idempotencyKey('cov-cn-invoice-fin', cnInvoiceDraft.id),
@@ -838,12 +899,11 @@ export class Scenario {
 
       const draft = await this.f.creditNotes.create(
         {
-          customerId: customer.id,
           relatedInvoiceId: cnInvoice.id,
           creditNoteType: 'partial',
           reasonCode: 'quality',
           reason: 'Coverage credit note (draft)',
-          items: [this.serviceLine(service, '1')],
+          creditedLines: [{ taxLineRef: 'svc-heure', amountTTC: 960 }],
           dates: { issued: isoDate() },
         },
         { idempotencyKey: idempotencyKey('cov-credit-note-draft', cnInvoice.id) },
@@ -854,12 +914,11 @@ export class Scenario {
 
       const finalDraft = await this.f.creditNotes.create(
         {
-          customerId: customer.id,
           relatedInvoiceId: cnInvoice.id,
           creditNoteType: 'partial',
           reasonCode: 'quality',
           reason: 'Coverage credit note (finalized)',
-          items: [this.serviceLine(service, '1')],
+          creditedLines: [{ taxLineRef: 'svc-heure', amountTTC: 960 }],
           dates: { issued: isoDate() },
         },
         { idempotencyKey: idempotencyKey('cov-credit-note-final', cnInvoice.id) },
@@ -876,15 +935,31 @@ export class Scenario {
     // on a finalized throwaway; cancel a separate draft (only draft invoices can
     // be cancelled — a finalized invoice is immutable under CGI art. 289).
     try {
+      // One final decision creates exactly ONE invoice: each throwaway
+      // document below takes its own decision.
+      const draftDecision = await this.decide(
+        customer, [this.subscriptionDecisionLine(subscription)], 'cov-invoice-draft',
+      )
+      if (!draftDecision) throw new Error('coverage decision is not final')
       const draft = await this.f.invoices.create(
-        this.invoiceCreateBody(customer, [this.subscriptionLine(subscription)]),
+        this.invoiceBodyFromDecision(customer, draftDecision.id, [
+          { taxLineRef: 'abo-mensuel', unit: 'month', product: subscription.id },
+        ]),
         { idempotencyKey: idempotencyKey('cov-invoice-draft') },
       )
+      // Only non-fiscal fields are patchable: the operation belongs to the
+      // decision, which is immutable.
       await this.f.invoices.update(draft.id, { notes: 'Coverage update' })
       await this.f.invoices.del(draft.id)
 
+      const paidDecision = await this.decide(
+        customer, [this.subscriptionDecisionLine(subscription)], 'cov-invoice-paid',
+      )
+      if (!paidDecision) throw new Error('coverage decision is not final')
       const paid = await this.f.invoices.create(
-        this.invoiceCreateBody(customer, [this.subscriptionLine(subscription)]),
+        this.invoiceBodyFromDecision(customer, paidDecision.id, [
+          { taxLineRef: 'abo-mensuel', unit: 'month', product: subscription.id },
+        ]),
         { idempotencyKey: idempotencyKey('cov-invoice-paid') },
       )
       await this.f.invoices.finalize(paid.id, { idempotencyKey: idempotencyKey('cov-inv-paid-fin', paid.id) })
@@ -896,8 +971,14 @@ export class Scenario {
       await this.f.invoices.createPaymentToken(paid.id).catch((e) => log.warn(`createPaymentToken: ${describeError(e)}`))
       await this.f.invoices.email(paid.id).catch((e) => log.warn(`invoices.email: ${describeError(e)}`))
 
+      const cancelDecision = await this.decide(
+        customer, [this.subscriptionDecisionLine(subscription)], 'cov-invoice-cancel',
+      )
+      if (!cancelDecision) throw new Error('coverage decision is not final')
       const toCancel = await this.f.invoices.create(
-        this.invoiceCreateBody(customer, [this.subscriptionLine(subscription)]),
+        this.invoiceBodyFromDecision(customer, cancelDecision.id, [
+          { taxLineRef: 'abo-mensuel', unit: 'month', product: subscription.id },
+        ]),
         { idempotencyKey: idempotencyKey('cov-invoice-cancel') },
       )
       await this.f.invoices.cancel(toCancel.id, { idempotencyKey: idempotencyKey('cov-inv-cancel-do', toCancel.id) })
@@ -916,7 +997,12 @@ export class Scenario {
           nextGenerationDate: isoDate(30),
           autoFinalize: false,
           autoSend: false,
-          templateInvoice: { items: [this.subscriptionLine(subscription)], paymentMethod: 'transfer', paymentTermsDays: 30 },
+          taxInputs: {
+            taxSource: 'facturino',
+            priceMode: 'tax_exclusive',
+            lines: [{ ...this.subscriptionDecisionLine(subscription), unit: 'month', product: subscription.id }],
+          },
+          templateInvoice: { paymentMethod: 'transfer', paymentTermsDays: 30 },
         },
         { idempotencyKey: idempotencyKey('cov-recurring') },
       )
@@ -976,22 +1062,461 @@ export class Scenario {
   // ---------------------------------------------------------------------------
 
   /** Build an invoice line for the monthly subscription product. */
-  private subscriptionLine(product: Product): InvoiceLineItemParam {
-    return {
-      description: product.name,
+  // ---------------------------------------------------------------------------
+  // K. Decision-first billing
+  // ---------------------------------------------------------------------------
+
+  /**
+   * K — the decision-first journey: decide, charge the decided amount, verify
+   * after capture, then invoice against the decision.
+   *
+   * This is the order that matters. The VAT and the exact amount to debit come
+   * from Facturino BEFORE anything is collected, and the decision id travels
+   * with the settlement so what was received can be checked against what was
+   * decided.
+   *
+   * Facturino imposes no payment service provider and no payment method. The
+   * flow below is provider-neutral: the decision id is carried in the payment
+   * REFERENCE, which every settlement has — a transfer, a direct debit, a
+   * cheque, cash, or a PSP capture. Two PSP variants are shown afterwards as
+   * examples; both are simulated locally, and no PSP is ever contacted.
+   */
+  async taxDecision(customer: Customer, subscription: Product): Promise<Invoice | null> {
+    log.step('K', 'Decision-first billing')
+
+    // K.2 — Decide BEFORE any payment. The idempotency key is stable for this
+    // order, so replaying the phase replays the same decision.
+    const orderRef = `atelier-dupont-${isoDate()}`
+    const decision = await this.f.taxDecisions.create(
+      {
+        // Facturino determines the VAT: the lines DESCRIBE the operation and
+        // never state a rate. `taxSource: 'integration'` is the other journey,
+        // shown in integrationDecision() below.
+        taxSource: 'facturino',
+        customerId: customer.id,
+        // The effective date drives the applicable rules — not the wall clock.
+        effectiveAt: isoDate(),
+        currency: 'eur',
+        priceMode: 'tax_exclusive',
+        lines: [{
+          reference: 'abo-pro',
+          description: subscription.name,
+          // A subscription delivered online is an electronically supplied
+          // service: it carries its own place-of-supply rules.
+          category: 'electronically_supplied_services',
+          rateCategory: 'standard',
+          unitAmount: 9900, // integer cents
+          quantity: '1', // decimal STRING, never a float
+        }],
+      },
+      { idempotencyKey: idempotencyKey('tax-decision', orderRef) },
+    )
+    log.ok(`Decision ${decision.id} — status=${decision.status}`)
+
+    // K.3 — Stop immediately unless the decision is final. `pending_verification`
+    // does not mean "nothing to charge": the amounts are null, not zero.
+    if (decision.status !== 'final' || decision.amountToCharge === null) {
+      for (const issue of decision.issues) log.warn(`missing: ${issue.code} — ${issue.message}`)
+      log.warn('Decision is not final: nothing is charged and no invoice is issued.')
+      return null
+    }
+
+    // K.4 — Charge exactly what was decided, in the decided currency.
+    const amountToCharge = decision.amountToCharge
+    const currency = decision.currency
+    log.info(`Charge ${eur(amountToCharge)} ${currency.toUpperCase()} — decided, not computed here`)
+
+    // K.5 — Carry the decision id with the settlement, whatever the means.
+    // Every settlement has a reference: a transfer wording, a direct-debit
+    // mandate reference, a cheque number, a PSP charge id. That reference is
+    // what lets step K.7 verify what was actually received.
+    const settlement = {
+      amount: amountToCharge,
+      currency,
+      // transfer, card, check, cash, direct_debit, sepa, paypal or other
+      method: 'transfer' as const,
+      reference: decision.id,
+      paidAt: isoDate(),
+      customerId: customer.id,
+    }
+    log.info(`Settlement reference ${settlement.reference} — ${eur(settlement.amount)} by ${settlement.method}`)
+
+    // K.5b — OPTIONAL, for a PSP-collected payment. Two examples, nothing more:
+    // Facturino requires neither. Simulated locally — no call is made.
+    log.info(
+      `Optional PSP variants — Stripe metadata ${JSON.stringify({ facturino_tax_decision_id: decision.id })}` +
+        ` | PayPal custom_id=${decision.id}, value=${(amountToCharge / 100).toFixed(2)}`,
+    )
+
+    // K.6 — Once settled, read the decision back from the reference carried
+    // with the payment.
+    const source = await this.f.taxDecisions.retrieve(settlement.reference)
+
+    // K.7 — Verify amount, currency and buyer against the decision. A mismatch
+    // means the settlement and the invoice would not describe the same operation.
+    if (settlement.amount !== source.amountToCharge) throw new Error('settled amount differs from the decision')
+    if (settlement.currency !== source.currency) throw new Error('settled currency differs from the decision')
+    if (settlement.customerId !== source.customerId) throw new Error('settled buyer differs from the decision')
+    log.ok('Settlement matches the decision: amount, currency and buyer')
+
+    // K.8 — The invoice is backed by the decision. No VAT is restated: a
+    // decision line is referenced, and the document line carries presentation
+    // only (unit, catalogue product).
+    const draft = await this.f.invoices.create(
+      {
+        customerId: source.customerId,
+        taxDecisionId: source.id,
+        decisionLines: [{ taxLineRef: 'abo-pro', unit: subscription.unit, product: subscription.id }],
+        buyer: {
+          companyName: customer.name,
+          address: customer.address,
+          ...(customer.siret ? { siret: customer.siret } : {}),
+          ...(customer.vatNumber ? { vatNumber: customer.vatNumber } : {}),
+        },
+        dates: { issued: isoDate(), due: isoDate(30) },
+        payment: this.paymentTerms(),
+      },
+      { idempotencyKey: idempotencyKey('tax-decision-invoice', source.id) },
+    )
+
+    // K.9 — Finalize: the number is assigned and the content is fixed.
+    const invoice = await this.f.invoices.finalize(draft.id, {
+      idempotencyKey: idempotencyKey('tax-decision-invoice-fin', draft.id),
+    })
+    log.ok(`Invoice ${invoice.number} — taxSource=${invoice.taxSource}`)
+
+    // K.10 — Send to the platform ONLY on the channel the decision states.
+    if (source.invoiceChannel === 'einvoicing') {
+      await this.f.invoices.send(invoice.id, { idempotencyKey: idempotencyKey('tax-decision-send', invoice.id) })
+      log.ok('Sent to the connected platform (invoiceChannel = einvoicing)')
+    } else {
+      // Not a failure: the operation is simply outside the e-invoicing channel.
+      // Attempting `invoices.send` here would be refused, and rightly so.
+      log.info(`invoiceChannel=${source.invoiceChannel ?? 'none'} — no platform deposit; the obligation, if any, goes through e-reporting`)
+    }
+
+    // K.11 — Keep the reporting axes: they are the obligations, and they hold
+    // whether or not the invoice travelled the network.
+    log.info(
+      `Axes — transaction=${source.transactionReporting ?? 'none'} ` +
+        `| payment=${source.paymentReporting ?? 'none'}`,
+    )
+    for (const reason of source.obligationReasons) {
+      log.info(`  ${reason.axis}: ${reason.code} (${reason.reference})`)
+    }
+    if (source.foreignTaxReviewRequired) {
+      // Facturino decides French VAT and the matching French obligations only.
+      log.warn('foreignTaxReviewRequired: a foreign tax may apply — review it outside Facturino')
+    }
+
+    // K.12 — Record the REAL collection on the invoice, with its real date,
+    // its real method and the reference that carries the decision id. The
+    // payment axis moves; the transmission axis does not.
+    let settled = invoice
+    try {
+      await this.f.invoices.payments.create(
+        invoice.id,
+        {
+          amount: settlement.amount,
+          method: settlement.method,
+          reference: settlement.reference,
+          paidAt: settlement.paidAt,
+        },
+        { idempotencyKey: idempotencyKey('tax-decision-payment', invoice.id) },
+      )
+      settled = await this.f.invoices.get(invoice.id)
+      log.ok(`Collection recorded — payment axis ${settled.paymentStatus ?? 'unpaid'}`)
+    } catch (err) {
+      log.warn(`payments.create: ${describeError(err)}`)
+    }
+
+    // Three status axes, read off the finalized invoice.
+    log.info(
+      `Invoice axes — document=${settled.documentStatus ?? settled.status} ` +
+        `| transmission=${settled.transmissionStatus ?? 'not_applicable'} ` +
+        `| payment=${settled.paymentStatus ?? 'unpaid'}`,
+    )
+    return settled
+  }
+
+  /**
+   * K.11b — Deposit invoice (386) then balance invoice, decision-backed.
+   *
+   * The order matters and is the point of this block: a deposit is deducted as
+   * PREPAID (BT-113), and an amount is only prepaid once it has actually been
+   * collected. So the deposit is decided, invoiced, finalized, and its payment
+   * is recorded IN FULL before it is attached to the balance invoice. A
+   * deposit that is merely finalized has been invoiced, not paid, and
+   * presenting it as prepaid would overstate what the buyer already settled.
+   *
+   * Deposits and schedule are settled SERVER-SIDE against the decided amount:
+   * the deposit seeds `amountPaid` (BT-113) and lowers `amountDue` (BT-115),
+   * and the instalments must distribute exactly what remains due.
+   */
+  async depositAndSchedule(customer: Customer, service: Product): Promise<void> {
+    log.step('K', 'Deposit and payment schedule')
+
+    // 1. Decide the deposit operation (type 386): a `deposit` line names the
+    //    principal supply it follows through `relatedCategory`.
+    const depositDecision = await this.decide(customer, [{
+      reference: 'acompte-svc',
+      description: `${service.name} — acompte`,
+      category: 'deposit',
+      relatedCategory: 'services',
+      rateCategory: 'standard',
+      unitAmount: 24_000, // 240,00 € HT — 30 % of the 800,00 € engagement
       quantity: '1',
-      unit: product.unit,
-      unitPrice: 9900, // 99,00 € in cents
-      vatRate: 2000, // 20,00 % in centipercent
-      vatCode: 'S',
-      product: product.id,
+    }], 'deposit', customer.id)
+    if (!depositDecision || depositDecision.amountToCharge === null) return
+
+    const depositDraft = await this.f.invoices.create(
+      {
+        ...this.invoiceBodyFromDecision(customer, depositDecision.id, [
+          { taxLineRef: 'acompte-svc', unit: 'unit' },
+        ]),
+        type: 'deposit',
+      },
+      { idempotencyKey: idempotencyKey('deposit-draft', customer.id) },
+    )
+
+    // 2. Finalize: the deposit is now a numbered, legal invoice.
+    const deposit = await this.f.invoices.finalize(depositDraft.id, {
+      idempotencyKey: idempotencyKey('deposit-final', depositDraft.id),
+    })
+    log.ok(`Deposit ${deposit.number} — ${eur(depositDecision.amountToCharge)} invoiced`)
+
+    // 3. Record its payment IN FULL — exactly the decided amount. Until this
+    //    happens the deposit is not prepaid, and must not be deducted.
+    await this.f.invoices.payments.create(
+      deposit.id,
+      {
+        amount: depositDecision.amountToCharge,
+        method: 'transfer',
+        reference: depositDecision.id,
+        paidAt: isoDate(),
+      },
+      { idempotencyKey: idempotencyKey('deposit-payment', deposit.id) },
+    )
+    const settled = await this.f.invoices.get(deposit.id)
+    if ((settled.paymentStatus ?? settled.status) !== 'paid') {
+      // Attaching an unsettled deposit would misstate BT-113.
+      log.warn(`Deposit ${deposit.number} is not settled — not attaching it to the balance invoice`)
+      return
+    }
+    log.ok(`Deposit ${deposit.number} settled — it may now be deducted as prepaid (BT-113)`)
+
+    // 4. Decide the balance operation, then create the invoice deducting the
+    //    SETTLED deposit and splitting what remains into instalments. The
+    //    decided amountToCharge is untouched; the instalments distribute
+    //    exactly the amount still due, and the last one falls on the invoice
+    //    due date (BT-9).
+    const balanceDecision = await this.decide(
+      customer, [this.serviceDecisionLine('10')], 'balance', deposit.id,
+    )
+    if (!balanceDecision || balanceDecision.amountToCharge === null) return
+    const stillDue = balanceDecision.amountToCharge - depositDecision.amountToCharge
+    const firstInstalment = Math.floor(stillDue / 2)
+    const balanceDraft = await this.f.invoices.create(
+      {
+        ...this.invoiceBodyFromDecision(customer, balanceDecision.id, [
+          { taxLineRef: 'svc-heure', unit: 'hour', product: service.id },
+        ]),
+        deposits: [{ invoiceId: deposit.id }],
+        schedule: [
+          { amount: firstInstalment, dueDate: isoDate(15), label: 'Premier versement' },
+          { amount: stillDue - firstInstalment, dueDate: isoDate(30), label: 'Solde' },
+        ],
+      },
+      { idempotencyKey: idempotencyKey('balance-draft', deposit.id) },
+    )
+    const balance = await this.f.invoices.finalize(balanceDraft.id, {
+      idempotencyKey: idempotencyKey('balance-final', balanceDraft.id),
+    })
+    log.ok(
+      `Balance invoice ${balance.number} — total ${balance.totals.totalTTC} ` +
+        `| prepaid ${balance.totals.amountPaid} | due ${balance.totals.amountDue}`,
+    )
+  }
+
+  /**
+   * K.12 — Credit a DECIDED invoice.
+   *
+   * `creditedLines` references the decided lines; the rate, the category, the
+   * VATEX code and the legal mention are inherited from the invoice's frozen
+   * snapshot. Restating them through `items` is refused, and should be.
+   */
+  async decidedCreditNote(invoice: Invoice): Promise<void> {
+    if (invoice.taxDecisionId === undefined) {
+      // Every invoice this scenario creates is decision-backed; only a
+      // pre-stable fixture could lack one, and crediting it is refused.
+      log.warn('Invoice carries no decision — crediting it would be refused (tax_decision_required)')
+      return
+    }
+
+    const creditNote = await this.f.creditNotes.create(
+      {
+        relatedInvoiceId: invoice.id,
+        creditNoteType: 'partial',
+        reasonCode: 'quality',
+        reason: 'Partial credit on a decided invoice',
+        // Either `quantity` or `amountTTC`, never both. Omitting both credits
+        // the line's whole remaining balance.
+        creditedLines: [{ taxLineRef: 'abo-pro', amountTTC: 1200 }],
+        dates: { issued: isoDate() },
+      },
+      { idempotencyKey: idempotencyKey('decided-credit-note', invoice.id) },
+    )
+    log.ok(`Credit note ${creditNote.id} — inherits decision ${creditNote.originalTaxDecisionId ?? invoice.taxDecisionId}`)
+  }
+
+  /**
+   * K.13 — A recurrence on the decided journey.
+   *
+   * `taxInputs` carries the OPERATION, not a decision: a recurrence never
+   * stores one. Each occurrence is decided on its own effective date, so a
+   * schedule created today does not carry this quarter's rules into next year.
+   */
+  async decidedRecurring(customer: Customer, subscription: Product): Promise<void> {
+    const recurring = await this.f.recurringInvoices.create(
+      {
+        customerId: customer.id,
+        frequency: 'monthly',
+        startDate: isoDate(),
+        nextGenerationDate: isoDate(30),
+        taxInputs: {
+          taxSource: 'facturino',
+          priceMode: 'tax_exclusive',
+          lines: [{
+            reference: 'abo-pro',
+            description: subscription.name,
+            category: 'electronically_supplied_services',
+            rateCategory: 'standard',
+            unitAmount: 9900,
+            quantity: '1',
+            unit: subscription.unit,
+            product: subscription.id,
+          }],
+        },
+        // `templateInvoice` carries presentation and terms only — never a
+        // line, never a rate.
+        templateInvoice: { paymentTermsDays: 30 },
+      },
+      { idempotencyKey: idempotencyKey('decided-recurring', customer.id) },
+    )
+    log.ok(`Recurrence ${recurring.id} — every occurrence is decided on its own date`)
+  }
+
+  /**
+   * K.14 — The OTHER fiscal journey: the VAT is supplied by the integration.
+   *
+   * An ERP, a marketplace engine or an in-house rules service that already
+   * determines the VAT declares it on the decision (`taxSource: 'integration'`)
+   * instead of asking Facturino to determine it. Facturino validates the
+   * coherence of what is supplied and refuses contradictions
+   * (`integration_vat_incoherent`) — it never silently corrects a rate. The
+   * decision, the invoice and the reporting obligations then work exactly as
+   * on the `facturino` source: the two journeys are equals.
+   */
+  async integrationDecision(customer: Customer): Promise<void> {
+    log.step('K', 'Integration-supplied VAT')
+
+    const decision = await this.f.taxDecisions.create(
+      {
+        taxSource: 'integration',
+        customerId: customer.id,
+        effectiveAt: isoDate(),
+        currency: 'eur',
+        priceMode: 'tax_exclusive',
+        lines: [{
+          reference: 'conseil-integ',
+          description: 'Prestation de conseil (TVA fournie par l’ERP)',
+          category: 'services',
+          unitAmount: 10_000,
+          quantity: '1',
+          vatRate: 2000, // 20,00 % — concluded by YOUR system, never corrected
+          vatCode: 'S',
+        }],
+      },
+      { idempotencyKey: idempotencyKey('integration-decision', customer.id) },
+    )
+    if (decision.status !== 'final' || decision.amountToCharge === null) {
+      for (const issue of decision.issues) log.warn(`missing: ${issue.code} — ${issue.message}`)
+      return
+    }
+    log.ok(`Integration decision ${decision.id} — ${eur(decision.amountToCharge)} (taxSource=${decision.taxSource})`)
+
+    // The invoice is created from the decision exactly as on the facturino
+    // source — same contract, same axes, same obligations engine.
+    const draft = await this.f.invoices.create(
+      this.invoiceBodyFromDecision(customer, decision.id, [
+        { taxLineRef: 'conseil-integ', unit: 'unit' },
+      ]),
+      { idempotencyKey: idempotencyKey('integration-invoice', decision.id) },
+    )
+    const invoice = await this.f.invoices.finalize(draft.id, {
+      idempotencyKey: idempotencyKey('integration-invoice-fin', draft.id),
+    })
+    log.ok(`Invoice ${invoice.number} — taxSource=${invoice.taxSource}`)
+
+    // A contradiction is refused, never corrected: a positive rate cannot
+    // carry an exemption code.
+    try {
+      await this.f.taxDecisions.create(
+        {
+          taxSource: 'integration',
+          customerId: customer.id,
+          effectiveAt: isoDate(),
+          currency: 'eur',
+          priceMode: 'tax_exclusive',
+          lines: [{
+            reference: 'incoherent',
+            description: 'Ligne incohérente (démonstration du refus)',
+            category: 'services',
+            unitAmount: 10_000,
+            quantity: '1',
+            vatRate: 2000,
+            vatCode: 'S',
+            vatexCode: 'VATEX-EU-G',
+          }],
+        },
+        { idempotencyKey: idempotencyKey('integration-incoherent', customer.id, isoDate()) },
+      )
+      log.warn('Incoherent supplied VAT was NOT refused — this should not happen')
+    } catch (err) {
+      log.ok(`Contradiction refused, never corrected: ${describeError(err)}`)
+    }
+  }
+
+  /** Commercial line of the subscription, for a tax decision (no rate stated). */
+  private subscriptionDecisionLine(product: Product): TaxDecisionLineParam {
+    return {
+      reference: 'abo-mensuel',
+      description: product.name,
+      // A subscription delivered online is an electronically supplied service:
+      // it carries its own place-of-supply rules.
+      category: 'electronically_supplied_services',
+      rateCategory: 'standard',
+      unitAmount: 9900, // 99,00 € in integer cents
+      quantity: '1', // decimal STRING, never a float
+    }
+  }
+
+  /** Commercial line of the hourly service, for a tax decision. */
+  private serviceDecisionLine(quantity: string): TaxDecisionLineParam {
+    return {
+      reference: 'svc-heure',
+      description: 'Prestation atelier (à l’heure)',
+      category: 'services',
+      rateCategory: 'standard',
+      unitAmount: 8000, // 80,00 €
+      quantity,
     }
   }
 
   /**
-   * Build an invoice/quote line for the hourly service product. Standard-rate
-   * VAT here; an exempt line could also set `vatexCode` (e.g. 'VATEX-FR-261' for
-   * Qualiopi training) to state the exemption basis (BT-121) explicitly.
+   * Build a QUOTE line for the hourly service product. A quote is a commercial
+   * document with an INDICATIVE VAT; converting it to an invoice goes through
+   * a tax decision, which re-decides the VAT.
    */
   private serviceLine(product: Product, quantity: string): InvoiceLineItemParam {
     return {
@@ -999,22 +1524,67 @@ export class Scenario {
       quantity,
       unit: 'hour',
       unitPrice: 8000, // 80,00 €
-      vatRate: 2000,
+      vatRate: 2000, // indicative on a quote; the decision concludes
       vatCode: 'S',
       product: product.id,
     }
   }
 
-  /** Assemble a full invoice-create body (buyer BG-7 from the customer). */
-  private invoiceCreateBody(
+  /** Payment terms shared by every invoice the scenario issues (BT-20, L441-10). */
+  private paymentTerms() {
+    return {
+      terms: 'Paiement à 30 jours',
+      termsDays: 30,
+      method: 'transfer' as const,
+      latePaymentRate: '10.00',
+      collectionFee: '40.00',
+    }
+  }
+
+  /**
+   * Take a decision (taxSource `facturino`) on the given commercial lines.
+   * Returns null — after logging what is missing — unless the decision is
+   * final: `pending_verification` means "cannot conclude yet", never "0".
+   */
+  private async decide(
     customer: Customer,
-    lines: InvoiceLineItemParam[],
+    lines: TaxDecisionLineParam[],
+    ...keyParts: string[]
+  ): Promise<TaxDecision | null> {
+    const decision = await this.f.taxDecisions.create(
+      {
+        taxSource: 'facturino',
+        customerId: customer.id,
+        effectiveAt: isoDate(),
+        currency: 'eur',
+        priceMode: 'tax_exclusive',
+        lines,
+      },
+      { idempotencyKey: idempotencyKey('decision', ...keyParts) },
+    )
+    if (decision.status !== 'final') {
+      for (const issue of decision.issues) log.warn(`missing: ${issue.code} — ${issue.message}`)
+      return null
+    }
+    return decision
+  }
+
+  /**
+   * Assemble a decision-backed invoice-create body (buyer BG-7 from the
+   * customer). The document lines reference the decided lines and carry
+   * presentation only — the VAT comes from the decision.
+   */
+  private invoiceBodyFromDecision(
+    customer: Customer,
+    taxDecisionId: string,
+    decisionLines: DecisionBackedLineParam[],
     extra?: { purchaseOrderNumber?: string; notes?: string },
   ) {
     return {
       customerId: customer.id,
       type: 'standard' as const,
-      lines,
+      taxDecisionId,
+      decisionLines,
       // Buyer block (BG-7). Only set siret/vatNumber when the customer carries
       // them — under exactOptionalPropertyTypes an explicit `undefined` is not
       // the same as an absent optional field.
@@ -1025,15 +1595,7 @@ export class Scenario {
         ...(customer.vatNumber ? { vatNumber: customer.vatNumber } : {}),
       },
       dates: { issued: isoDate(), due: isoDate(30) },
-      payment: {
-        terms: 'Paiement à 30 jours',
-        termsDays: 30,
-        method: 'transfer' as const,
-        latePaymentRate: '10.00',
-        collectionFee: '40.00',
-      },
-      // e-invoicing format/profile are derived server-side from company
-      // settings; they are read-only on the invoice and not set at creation.
+      payment: this.paymentTerms(),
       ...(extra?.purchaseOrderNumber ? { purchaseOrderNumber: extra.purchaseOrderNumber } : {}),
       ...(extra?.notes ? { notes: extra.notes } : {}),
     }
@@ -1091,7 +1653,7 @@ export class Scenario {
 }
 
 /**
- * Run the entire A→J scenario in order. Each phase logs its progress.
+ * Run the entire A→K scenario in order. Each phase logs its progress.
  */
 export async function runScenario(f: Facturino, config: Config): Promise<void> {
   const scenario = new Scenario(f, config)
@@ -1106,11 +1668,15 @@ export async function runScenario(f: Facturino, config: Config): Promise<void> {
   const invoice = await scenario.invoiceLifecycle(
     company,
     customer,
-    subscription,
     draftFromQuote,
     quoteId,
   )
   await scenario.recurring(customer, subscription)
+  const decidedInvoice = await scenario.taxDecision(customer, subscription)
+  await scenario.depositAndSchedule(customer, service)
+  if (decidedInvoice) await scenario.decidedCreditNote(decidedInvoice)
+  await scenario.decidedRecurring(customer, subscription)
+  await scenario.integrationDecision(customer)
   await scenario.creditNote(customer, invoice, service)
   await scenario.purchases()
   await scenario.webhooks()

@@ -3,11 +3,11 @@
 A small, runnable backend that bills the fictional **Atelier Dupont SAS** end
 to end through the Facturino API, using the official Go SDK
 (`github.com/facturino/facturino-go`). It walks the shared scenario described
-in [`../docs/SCENARIO.md`](../docs/SCENARIO.md), phases **A through J**.
+in [`../docs/SCENARIO.md`](../docs/SCENARIO.md), phases **A through K**.
 
 The app is a `net/http` server. Some routes trigger scenario phases; the
 `/webhooks` route receives Facturino events and verifies their signature with
-the SDK's webhook helper. It can also run the whole parcours once from the CLI.
+the SDK's webhook helper. It can also run the whole workflow once from the CLI.
 
 ## Requirements
 
@@ -17,11 +17,11 @@ the SDK's webhook helper. It can also run the whole parcours once from the CLI.
 
 ## Install the SDK dependency
 
-The SDK is published as a Go module. This demo's `go.mod` currently pins
-`v1.0.0`. To upgrade explicitly to the current compatible release:
+The SDK is published as a Go module. This demo's `go.mod` pins the first
+release carrying fiscal decisions:
 
 ```bash
-go get github.com/facturino/facturino-go@v1.1.0
+go get github.com/facturino/facturino-go/v2@v2.0.0
 ```
 
 For local development against the sibling SDK checkout, copy
@@ -65,7 +65,7 @@ go run .
 Then trigger the scenario:
 
 ```bash
-# the whole parcours A..J
+# the whole workflow A..K
 curl -X POST http://localhost:4242/run
 
 # or one phase at a time
@@ -126,7 +126,7 @@ attempts them.
 ├── dotenv.go                  # minimal .env loader (no third-party dependency)
 ├── internal/
 │   ├── config/config.go       # env -> Config -> facturino.New(...)
-│   ├── scenario/              # the A..J parcours
+│   ├── scenario/              # the A..K workflow
 │   │   ├── scenario.go        # Runner, state, error formatting, polling helpers
 │   │   ├── log.go             # structured phase/step logger
 │   │   ├── list.go            # decode the first item of a ListResponse
@@ -153,16 +153,16 @@ The scenario steps map to SDK calls as follows. Service names are the fields on
 | **B.5** Products | `Products.Create` / `Get` / `Update` / `List` (incl. `ProductListParams{Q, Category, Active}` filters) / `ExportCSV` | `POST /run/catalogue` |
 | **B.6** Customer | `Customers.Lookup` / `Create` (with a `Contact{Role: "billing"}`) / `Get` / `Update` / `List` / `ExportCSV` | `POST /run/catalogue` |
 | **C.7** Quote | `Quotes.Create` / `Send` / `Get` / `Accept` / `GetSignatureProof` / `GetPDF` / `Clone` / `Convert` | `POST /run/quote` |
-| **C.8** Pre-flight validation | `Validate.Run` | `POST /run/quote` |
-| **D.9** Create / finalize | `Invoices.Create` / `Finalize` / `Get` / `GetStatus` / `List` (`InvoiceListParams{ConvertedFrom}`) | `POST /run/invoice` |
+| **C.8** Pre-flight validation (decision-backed) | `TaxDecisions.Create`, `Validate.Run` | `POST /run/quote` |
+| **D.9** Decide, create from the decision, finalize | `TaxDecisions.Create`, `Invoices.Create` (`TaxDecisionID` + `DecisionLines`) / `Finalize` / `Get` / `GetStatus` / `List` (`InvoiceListParams{ConvertedFrom}`) | `POST /run/invoice` |
 | **D.10** Documents | `Invoices.GetPDF` / `GetFacturX` / `GetXML` (CII + UBL), `Jobs.Get` (poll) | `POST /run/invoice` |
 | **D.11** Deposit to PA | `Invoices.Send`, `Sandbox.SimulateStatus` (determinism) | `POST /run/invoice` |
 | **D.12** Payment | `Invoices.CreatePaymentLink` / `CreatePortalLink` / `CreatePaymentToken`, `Payments.Create` / `List` | `POST /run/invoice` |
 | **D.13** Reminder & events | `Invoices.Remind`, `Invoices.ListEvents` | `POST /run/invoice` |
 | **D.14** Audit trail | `Invoices.Verify`, `Invoices.GetAuditTrail`, `Invoices.GenerateAuditTrailPDF` | `POST /run/invoice` |
 | **D.15** Clone | `Invoices.Clone` | `POST /run/invoice` |
-| **E.16** Recurring | `RecurringInvoices.Create` / `Get` / `List` / `Update` / `Pause` / `Resume` | `POST /run/recurring` |
-| **F.17** Credit note | `CreditNotes.Create` / `Finalize` / `Send` / `GetPDF` / `GetFacturX`, then `Invoices.Get` (`InvoiceGetParams{Expand: ["credit_notes"]}` → `Invoice.Expanded.CreditNotes` + `NetBalance`) | `POST /run/credit-note` |
+| **E.16** Recurring (`TaxInputs` + its `TaxSource`) | `RecurringInvoices.Create` / `Get` / `List` / `Update` / `Pause` / `Resume` | `POST /run/recurring` |
+| **F.17** Credit note (`CreditedLines`, inherited VAT) | `CreditNotes.Create` / `Finalize` / `Send` / `GetPDF` / `GetFacturX`, then `Invoices.Get` (`InvoiceGetParams{Expand: ["credit_notes"]}` → `Invoice.Expanded.CreditNotes` + `NetBalance`) | `POST /run/credit-note` |
 | **G.18** Received invoices | `Invoices.CreateIncoming` / `ListIncoming`, `ReceivedInvoices.List` / `Get` / `Approve` / `Refuse`¹ / `Suspend`¹ / `RecordPayment` | `POST /run/received` |
 | **H.19** Webhook endpoint | `WebhookEndpoints.Create` / `List` / `Test` | `POST /run/webhooks` |
 | **H.20** Reception | `facturino.VerifyWebhookSignature` (in `internal/server`) | `POST /webhooks` |
@@ -173,6 +173,11 @@ The scenario steps map to SDK calls as follows. Service names are the fields on
 | **I.25** Archives | `Archives.List`, `Archives.Get` | `POST /run/accounting` |
 | **J.29** Platform billing (read-only) | `Billing.RetrieveSubscription` / `ListInvoices` / `GetInvoicePDF` | `POST /run/administration` |
 | **J.30** RGPD | `Account.RequestExport` / `DownloadExport` | `POST /run/administration` |
+| **K** Decision-first billing | `TaxDecisions.Create` / `Retrieve`, `Invoices.Create` (`TaxDecisionID` + `DecisionLines`) / `Finalize` / `Send` | `POST /run/tax-decision` |
+| **K** Deposit decided + settled, then deducted | `TaxDecisions.Create`, `Invoices.Create` (`Type: "deposit"`) / `Finalize`, `Payments.Create`, `Invoices.Create` (`Deposits` + `Schedule`, settled against the decided amount) | `POST /run/deposit-schedule` |
+| **K** Credit note on a decided invoice | `CreditNotes.Create` (`CreditedLines`) | `POST /run/decided-credit-note` |
+| **K** Recurrence on the decided journey | `RecurringInvoices.Create` (`TaxInputs`) | `POST /run/decided-recurring` |
+| **K** VAT supplied by the integration (`TaxSource: "integration"`) | `TaxDecisions.Create` (supplied `VatRate`/`VatCode`/`VatexCode`), `Invoices.Create`, refusal `integration_vat_incoherent` | `POST /run/integration-decision` |
 
 > Notes on a few SDK names that differ from the generic surface: reporting
 > methods are `Reporting.VAT` / `Reporting.Revenue`; document XML is

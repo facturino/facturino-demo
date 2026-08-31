@@ -11,8 +11,8 @@ declare(strict_types=1);
  * Routes :
  *   GET  /                  Index : liste des routes disponibles.
  *   GET  /health            Sonde de disponibilite.
- *   POST /run               Joue tout le parcours A -> J.
- *   POST /run/{phase}       Joue une phase (a..j) — voir map ci-dessous.
+ *   POST /run               Run the complete A -> K workflow.
+ *   POST /run/{phase}       Run one phase (a..k) — see the map below.
  *   POST /webhooks          Reception des webhooks Facturino (signature verifiee).
  *
  * Idempotency-Key : transmise via un X-Run-Id optionnel (en-tete ou query)
@@ -59,7 +59,7 @@ if ($method === 'POST' && $path === '/run') {
     return;
 }
 
-if ($method === 'POST' && preg_match('#^/run/([a-jA-J])$#', $path, $m) === 1) {
+if ($method === 'POST' && preg_match('#^/run/([a-kA-K])$#', $path, $m) === 1) {
     $scenario = newScenario($config);
     runPhase($scenario, strtolower($m[1]));
     sendJson(200, $scenario->result());
@@ -147,6 +147,14 @@ function runPhase(Scenario $scenario, string $phase): void
             $scenario->bootstrapAccount();
             $scenario->administration();
             break;
+        case 'k':
+            $scenario->bootstrapAccount();
+            $scenario->catalogAndCustomer();
+            $scenario->taxDecision();
+            $scenario->depositAndSchedule();
+            $scenario->decidedCreditNote();
+            $scenario->decidedRecurring();
+            break;
     }
 }
 
@@ -177,8 +185,8 @@ function indexPayload(): array
         'service' => 'Atelier Dupont — demo PHP (SDK Facturino)',
         'routes' => [
             'GET /health' => 'sonde de disponibilite',
-            'POST /run' => 'parcours complet A -> J',
-            'POST /run/{a..j}' => 'une phase du parcours',
+            'POST /run' => 'complete A -> K workflow',
+            'POST /run/{a..k}' => 'one workflow phase',
             'POST /webhooks' => 'reception webhooks (signature verifiee)',
         ],
         'options' => [
