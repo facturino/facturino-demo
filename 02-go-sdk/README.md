@@ -21,7 +21,7 @@ The SDK is published as a Go module. This demo's `go.mod` pins the first
 release carrying fiscal decisions:
 
 ```bash
-go get github.com/facturino/facturino-go/v2@v2.0.0
+go get github.com/facturino/facturino-go/v2@v2.1.0
 ```
 
 For local development against the sibling SDK checkout, copy
