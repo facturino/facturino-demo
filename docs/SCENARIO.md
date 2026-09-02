@@ -239,6 +239,57 @@ exactly as on the `facturino` source: the two journeys are equals. Every
 runner demonstrates a coherent integration decision, the invoice created from
 it, and one refused contradiction.
 
+**The thresholds are a ledger, not a profile field.** The running totals they
+are assessed on live in `/v1/eu-threshold-ledgers`, one ledger per company, per
+mode and per calendar year. It carries **two counters, strictly apart and
+independent**: the common EUR 10,000 threshold (distance sales of goods AND
+cross-border services to consumers) and the EUR 100,000 location-evidence
+threshold (electronically supplied services, domestic ones included). A distance
+sale of goods raises the first and never the second; a domestic electronic
+service raises the second and never the first. Neither bounds the other, which is
+why every figure comes in a pair rather than a total and a share of it.
+
+Facturino keeps the register of the operations it receives — a final decision
+consumes its slice of the total in the same transaction that writes it — while
+the sales made on other channels come in through an explicit adjustment, or
+through the opening declaration. Nothing is assumed: no year starts at zero on
+its own, and no sale made elsewhere is presumed absent.
+
+Two figures are published **apart and never summed**: `acquiredMin`, what the
+year has certainly made, and `reservedMin`, the slices held right now by
+operations still being decided. A held slice may still disappear, and a single
+"total" would hide exactly that. It is also why an abandoned operation leaves
+nothing behind: a verdict is frozen only when it holds at both bounds, so no
+decision ever depends on a sale that may never exist.
+
+Giving an amount back is a **qualified correction**, never a negative
+adjustment: it names the movement it corrects, its qualification, the resource
+it rests on and its evidence (Directive 2006/112/EC art. 90(1)). A movement gives
+back what it brought in **once**, whatever the number of corrections — the ledger
+keeps its balance inside the same transaction, and every entry publishes its
+`remainingMin`.
+
+What cannot be qualified that way is not subtracted at all — the ledger goes
+under review and stops deciding, rather than freeze verdicts on a total nobody
+stands behind. A review is settled by **reconciliation**, never by a comment: the
+version checked and the two verified totals must agree with the ledger's own.
+
+A decision is also never frozen **without its slice**: if the slice has
+disappeared when the decision is about to be written, the transaction is
+abandoned and the decision is refused, rather than committed on a total that does
+not carry it.
+
+Territoriality is one of the things the two journeys share rather than split —
+the frontier of the perimeter included. A B2C sale to a consumer of another
+member state traverses the same rule under both sources — coverage, the common
+EUR 10,000 threshold, the option, the evidence, the declarative mechanism — and
+the `integration` source compares the rate it supplies with the legal result
+instead of producing it, at both places the rule can settle. This workshop
+invoices French customers, so no phase of the scenario reaches that rule:
+`euB2cDestination` stays `null` on every decision it takes, and `goodsMovement`,
+which becomes required on a goods line sold to a consumer of another member
+state, is never needed here.
+
 ### Three status axes
 
 A document has three states that do not follow from one another:

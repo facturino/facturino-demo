@@ -122,6 +122,84 @@ interface TaxDecision extends Identified {
   invoiceChannel: 'einvoicing' | 'none' | null;
   transactionReporting: 'ereporting' | 'none' | 'outside_scope' | null;
   paymentReporting: 'fr212' | 'ereporting' | 'none' | null;
+  /**
+   * The axes French law settles even when the decision is NOT final. `null` on
+   * a final decision, where the three axes above are the settled ones. It
+   * authorises nothing: a non-final decision is not invoiceable.
+   */
+  settledObligations?: {
+    invoiceChannel: 'einvoicing' | 'none' | null;
+    transactionReporting: 'ereporting' | 'none' | 'outside_scope' | null;
+    paymentReporting: 'fr212' | 'ereporting' | 'none' | null;
+  } | null;
+  /**
+   * What the EU B2C destination rule concluded, frozen as data: the verdict and
+   * its basis, the threshold figures, the declarative mechanism and the rate
+   * entry with its registry version, its source, its verification date and its
+   * period. `null` on every operation the rule does not reach — this workshop
+   * invoices French customers, so it stays `null` throughout the scenario.
+   */
+  euB2cDestination?: {
+    place: 'origin' | 'destination' | null;
+    /**
+     * What settled the place. `oss_union_registration`: the seller holds an
+     * ACTIVE Union one-stop-shop registration — for a French seller, registering
+     * IS how the option of art. 59c(3) is exercised, so the threshold has
+     * nothing left to decide and `threshold` stays `null`.
+     */
+    basis: string | null;
+    /**
+     * How the destination tax is declared — and the DATED registration that
+     * serves this operation. A one-stop shop opened in October does not declare
+     * a September sale.
+     */
+    mechanism: {
+      kind: string;
+      memberState: string;
+      reference: string;
+      memberStateOfIdentification: string | null;
+      effectiveFrom: string;
+      effectiveTo: string | null;
+    } | null;
+    rate: { registryVersion: string; centipercent: number; regionId: string | null } | null;
+    /**
+     * How the single-evidence relaxation of art. 24b was settled, with the
+     * figures it rested on. It is COMPUTED on the ledger's own EUR 100,000
+     * counter — never the EUR 10,000 one, which also counts distance sales of
+     * goods — and never declared by the seller.
+     */
+    evidenceRelief: {
+      status: 'available' | 'unavailable' | 'undeterminable';
+      capCents: number;
+      previousYearAmountCents: number | null;
+      cumulativeAfterMinCents: number | null;
+      cumulativeAfterMaxCents: number | null;
+      undeterminedCode: string | null;
+    } | null;
+    /**
+     * The slice of the ANNUAL LEDGER the decision took: which ledger, at which
+     * version, at which position in its total order, and the totals before and
+     * after. The running total is not a field of the fiscal profile.
+     */
+    threshold: {
+      stateId: string;
+      year: string;
+      stateVersion: number;
+      sequence: number;
+      coverageMode: 'facturino_only' | 'mixed_channels';
+      /**
+       * What CERTAINLY precedes the operation (settled movements only) and what
+       * may (the same total plus every slice held by an operation being decided
+       * at the same moment). A verdict is frozen only when it holds at both, so
+       * an abandoned operation never has to be kept in the total to protect it.
+       */
+      cumulativeBeforeMinCents: number;
+      cumulativeBeforeMaxCents: number;
+      pendingPredecessorCount: number;
+      operationValueMinCents: number;
+      cumulativeAfterMinCents: number;
+    } | null;
+  } | null;
   foreignTaxReviewRequired?: boolean;
   vies?: { status?: string } | null;
   issues?: Array<{ code: string; message: string }>;
