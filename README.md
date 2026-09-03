@@ -53,9 +53,9 @@ Facturino events.
 > @facturino/node`, `pip install facturino`, `composer require
 > facturino/facturino-php`, `go get …`) work directly; each stack README
 > documents its pinned range. The scenario needs the SDK major that carries
-> the stable tax determination contract: `@facturino/node` 2.1.0, `facturino`
-> (Python) 2.1.0, `facturino/facturino-php` 2.1.0 and
-> `github.com/facturino/facturino-go/v2` v2.1.0.
+> the stable tax determination contract: `@facturino/node` 2.2.0, `facturino`
+> (Python) 2.2.0, `facturino/facturino-php` 2.2.0 and
+> `github.com/facturino/facturino-go/v2` v2.2.0.
 >
 > **Lockfiles.** The committed lockfiles (`package-lock.json`, `go.sum`,
 > `composer.lock`) resolve the published 2.0.0 SDKs. A fresh install therefore

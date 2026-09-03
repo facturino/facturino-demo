@@ -14,7 +14,7 @@
     "dev": "node --watch --experimental-strip-types src/server.ts"
   },
   "dependencies": {
-    "@facturino/node": "^2.1.0"
+    "@facturino/node": "^2.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.37",
