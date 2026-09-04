@@ -30,7 +30,7 @@ composer install
 To add or refresh the dependency explicitly:
 
 ```bash
-composer require facturino/facturino-php:^2.2
+composer require facturino/facturino-php:^2.3
 ```
 
 ## Configure
