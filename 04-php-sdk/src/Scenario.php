@@ -295,7 +295,16 @@ final class Scenario
 
         $this->step('B6d', 'customers.importCsv / exportCsv', function (): array {
             // Import : CSV texte (asynchrone, 202). Export : CSV brut (text/csv).
-            Customer::importCsv("name,type,email,siret\nCabinet Durand,company,contact@durand.test,55208131766522\n");
+            // Les noms de colonnes sont ceux qu'emet customers.exportCsv : un
+            // export doit se reimporter tel quel. Une adresse absente laisse un
+            // client avec une adresse de remplacement, dont aucune decision
+            // fiscale ne peut resoudre le territoire. Le SIRET est celui d'un
+            // AUTRE etablissement : importer un second enregistrement sous le
+            // SIRET du scenario masquerait son client au prochain lookup.
+            Customer::importCsv(
+                "name,email,siret,address_line1,address_postal_code,address_city,address_country\n"
+                . "Cabinet Durand,contact@durand.test,44306184100047,8 rue de la Paix,69007,Lyon,FR\n"
+            );
             $csv = Customer::exportCsv();
 
             return ['exportBytes' => strlen($csv)];
@@ -435,6 +444,10 @@ final class Scenario
                 'decisionLines' => $this->presentationFromDraft($draft),
             ], $this->idem->key('D9-bind-decision'));
             $this->state['invoiceId'] = $invoice['id'];
+            // Un avoir reference les lignes de la facture qu'il annule, et ces
+            // references sont attribuees cote serveur a la conversion : celle
+            // que la phase F credite est relue du document, jamais ecrite en dur.
+            $this->state['mainLineRef'] = $draft['lines'][0]['reference'];
 
             return ['invoiceId' => $invoice['id'], 'status' => $invoice['status'] ?? null, 'taxSource' => $invoice['taxSource'] ?? null];
         });
@@ -720,17 +733,32 @@ final class Scenario
                 'payment' => $this->paymentTerms(),
             ], $this->idem->key('K5-decided-invoice'));
 
-            $finalized = Invoice::finalize($invoice['id']);
+            // Finalize WITH the collection. The money was received at K3 and
+            // verified at K4, so the invoice is issued acquitted: the number
+            // and the payment are applied in the SAME transaction, and the
+            // original Factur-X is rendered on a settled document instead of
+            // one that says "to pay". A collection above what is due is
+            // refused (payment_exceeds_amount_due) and the invoice then stays
+            // a draft — no number is burned.
+            $finalized = Invoice::finalize($invoice['id'], [
+                'amount' => $this->state['settledAmount'],
+                'method' => $this->state['settlementMethod'],
+                'reference' => $this->state['settlementReference'],
+                'paidAt' => gmdate('Y-m-d'),
+            ]);
             $this->state['decidedInvoiceId'] = $finalized['id'];
 
             return [
                 'invoiceId' => $finalized['id'],
                 'number' => $finalized['number'] ?? null,
                 'taxSource' => $finalized['taxSource'] ?? null,
-                // The three status axes, read off the finalized invoice.
+                // The three status axes, read off the invoice AS ISSUED.
                 'documentStatus' => $finalized['documentStatus'] ?? null,
                 'transmissionStatus' => $finalized['transmissionStatus'] ?? null,
                 'paymentStatus' => $finalized['paymentStatus'] ?? null,
+                'expectedPaymentStatus' => 'paid',
+                // The REAL collection date, carried by the invoice itself.
+                'paidAt' => $finalized['dates']['paidAt'] ?? null,
             ];
         });
 
@@ -751,24 +779,19 @@ final class Scenario
             return ['sent' => true, 'invoiceChannel' => 'einvoicing'];
         });
 
-        // The REAL collection, with its real date, its real method and the
-        // reference that carries the decision id. The payment axis moves; the
-        // transmission axis does not.
-        $this->step('K6b', 'payments.create — record the real collection', function (): array {
-            Payment::create($this->state['decidedInvoiceId'], [
-                'amount' => $this->state['settledAmount'],
-                'method' => $this->state['settlementMethod'],
-                'reference' => $this->state['settlementReference'],
-                'paidAt' => gmdate('Y-m-d'),
-            ], $this->idem->key('K6b-decided-payment'));
-
-            $settled = Invoice::retrieve($this->state['decidedInvoiceId']);
+        // Nothing is recorded here: the collection was applied with the
+        // finalization. This reads the ledger back and proves it is there,
+        // with the reference that carries the decision id.
+        $this->step('K6b', 'payments.all — the collection applied at finalization', function (): array {
+            $ledger = Payment::all($this->state['decidedInvoiceId']);
 
             return [
-                'reference' => $this->state['settlementReference'],
-                'documentStatus' => $settled['documentStatus'] ?? null,
-                'transmissionStatus' => $settled['transmissionStatus'] ?? null,
-                'paymentStatus' => $settled['paymentStatus'] ?? null,
+                'count' => $ledger->count(),
+                'entries' => array_map(static fn (array $entry): array => [
+                    'amount' => $entry['amount'] ?? null,
+                    'method' => $entry['method'] ?? null,
+                    'reference' => $entry['reference'] ?? null,
+                ], $ledger->getData()),
             ];
         });
     }
@@ -778,13 +801,14 @@ final class Scenario
      *
      * The order matters and is the point: a deposit is deducted as PREPAID
      * (BT-113), and an amount is only prepaid once it has actually been
-     * collected. The deposit is therefore created, finalized, and its payment
-     * recorded IN FULL before it is attached to the balance invoice. A deposit
-     * that is merely finalized has been invoiced, not paid.
+     * collected. The deposit is therefore decided, then ISSUED SETTLED —
+     * finalization and full payment in one call — before it is attached to the
+     * balance invoice. A deposit that is merely finalized has been invoiced,
+     * not paid; issued acquitted, it never exists in that state at all.
      */
     public function depositAndSchedule(): void
     {
-        $this->step('K7', 'taxDecisions.create + invoices.create (386) + full payment', function (): array {
+        $this->step('K7', 'taxDecisions.create + invoices.create (386) + finalize with full payment', function (): array {
             // A `deposit` line names the principal supply it follows.
             $depositDecision = $this->decide([[
                 'reference' => 'acompte-prestation',
@@ -810,24 +834,27 @@ final class Scenario
                 'payment' => $this->paymentTerms(),
             ], $this->idem->key('K7-deposit'));
 
-            $deposit = Invoice::finalize($draft['id']);
-
-            // Record the payment IN FULL — exactly the decided amount. Until
-            // this happens the deposit is not prepaid, and must not be deducted.
-            Payment::create($deposit['id'], [
+            // Finalize WITH the payment IN FULL — exactly the decided amount,
+            // in a single call. An amount is only prepaid once it has been
+            // collected, and issuing the deposit acquitted is the strongest
+            // form of that rule: the deposit never exists unpaid, so it can
+            // never be deducted before it was settled.
+            $deposit = Invoice::finalize($draft['id'], [
                 'amount' => $depositDecision['amountToCharge'],
                 'method' => 'transfer',
+                'reference' => $depositDecision['id'],
                 'paidAt' => gmdate('Y-m-d'),
-            ], $this->idem->key('K7-deposit-payment'));
+            ]);
 
-            $settled = Invoice::retrieve($deposit['id']);
+            // The settlement is read off the ISSUED deposit, not fetched after.
             $this->state['depositInvoiceId'] = $deposit['id'];
-            $this->state['depositSettled'] = (($settled['paymentStatus'] ?? $settled['status'] ?? null) === 'paid');
+            $this->state['depositSettled'] = (($deposit['paymentStatus'] ?? $deposit['status'] ?? null) === 'paid');
 
             return [
                 'depositId' => $deposit['id'],
                 'number' => $deposit['number'] ?? null,
                 'settled' => $this->state['depositSettled'],
+                'paidAt' => $deposit['dates']['paidAt'] ?? null,
             ];
         });
 
@@ -902,6 +929,7 @@ final class Scenario
                 // Either `quantity` or `amountTTC`, never both. Omitting both
                 // credits the line's whole remaining balance.
                 'creditedLines' => [['taxLineRef' => 'abo-pro', 'amountTTC' => 1200]],
+                'dates' => ['issued' => gmdate('Y-m-d')],
             ], $this->idem->key('K9-decided-credit-note'));
 
             return [
@@ -1100,7 +1128,9 @@ final class Scenario
                 'reasonCode' => 'other',
                 'reason' => 'Remise commerciale exceptionnelle',
                 'creditedLines' => [
-                    ['taxLineRef' => 'conseil-2h', 'amountTTC' => 6000], // 50,00 EUR HT + TVA
+                    // La reference d'une ligne DE LA FACTURE creditee : elle est
+                    // attribuee cote serveur quand la facture vient d'un devis.
+                    ['taxLineRef' => $this->state['mainLineRef'], 'amountTTC' => 6000], // 50,00 EUR HT + TVA
                 ],
                 'dates' => [
                     'issued' => gmdate('Y-m-d'),
@@ -1112,7 +1142,10 @@ final class Scenario
         });
 
         $this->step('F17b', 'creditNotes.finalize / send / getPdf / getFacturx', function (): array {
-            $id = $this->state['creditNoteId'];
+            $id = $this->state['creditNoteId'] ?? null;
+            if (!is_string($id)) {
+                return ['skipped' => true, 'reason' => 'aucun avoir cree a l etape precedente'];
+            }
             $finalized = CreditNote::finalize($id);
             try {
                 CreditNote::send($id); // depot PA (PA integree, Essential+)

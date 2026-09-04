@@ -12,7 +12,9 @@ line.
 Phase **K** is the one to read if you collect money: it decides the VAT and the
 exact amount to charge **before** anything is collected, carries the decision id
 in the payment reference, verifies the settlement against the decision, then
-issues the invoice from that decision and records the real collection.
+issues the invoice from that decision **already acquitted** — the numbering and
+the collection are applied in the same transaction, so the original document
+never says "to pay" for money already received.
 
 Facturino imposes no payment service provider and no payment method. Phase K is
 provider-neutral — a transfer, a direct debit, a cheque, cash, a wallet, an

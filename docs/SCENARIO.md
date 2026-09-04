@@ -162,10 +162,12 @@ There is no full UI: the examples focus on API usage.
 
 ### K. Decision-first billing
 
-The order below is the point of the phase: the VAT and the exact amount to
-debit come from Facturino **before** anything is collected, and the decision id
-travels with the settlement so what was received can be checked against what
-was decided.
+**Decide, collect, verify, then issue settled.** That order is the point of the
+phase: the VAT and the exact amount to debit come from Facturino **before**
+anything is collected, the decision id travels with the settlement so what was
+received can be checked against what was decided, and the invoice is then issued
+**already acquitted** — the numbering and the collection are applied in the same
+transaction, so the original document says "paid" from the moment it exists.
 
 Facturino imposes no payment service provider and no payment method. The flow
 is provider-neutral: the decision id is carried in the payment **reference**,
@@ -201,20 +203,44 @@ examples afterwards; both are simulated locally, and no PSP is ever contacted.
     it comes from the decision, and a decision line carries presentation only
     (`taxLineRef`, `unit`, optional `product`). One final decision creates
     exactly one invoice.
-36. **Finalize** — `invoices.finalize` assigns the number and fixes the content.
+36. **Finalize with the collection** — `invoices.finalize` assigns the number
+    and fixes the content, and its optional `payment` body applies the real
+    collection in the **same transaction**: the real amount, the real date, the
+    real method (`transfer`, `card`, `check`, `cash`, `direct_debit`, `sepa`,
+    `paypal` or `other`) and the reference that carries the decision id. The
+    money was already received at step 31, so the invoice is issued acquitted
+    rather than issued to pay and settled a moment later. The original — the
+    Factur-X and its XML — is rendered on that settled document and never says
+    "to pay" for an invoice that was paid before it existed. The invoice comes
+    back with `paymentStatus: "paid"` and `dates.paidAt`, the real settlement
+    date. It is all or nothing: a collection above what remains due is refused
+    with `payment_exceeds_amount_due` (422, `error.issues` pointing at
+    `payment.amount`) and the invoice stays a draft — no number is burned.
 37. **Send to the platform only if `invoiceChannel == einvoicing`** — otherwise
     no deposit is attempted. Calling `invoices.send` outside that channel would
-    be refused, and rightly so.
-38. **Record the real collection** — `payments.create` on the invoice, with the
-    real amount, the real date, the real method (`transfer`, `card`, `check`,
-    `cash`, `direct_debit`, `sepa`, `paypal` or `other`) and the reference that
-    carries the decision id. The payment axis moves; the transmission axis does
-    not.
+    be refused, and rightly so. A settled invoice is still depositable: the
+    three axes are independent, and a paid document whose transmission is still
+    pending travels the network normally.
+38. **Read the ledger back** — `payments.list` on the invoice shows the
+    collection that was applied at finalization, with the reference that carries
+    the decision id. Nothing is recorded here: recording it a second time is
+    exactly what issuing the invoice settled removes. `payments.create` remains
+    the way to record a collection that arrives **after** issuance — an invoice
+    paid on terms, a late transfer — and it moves the payment axis without
+    touching the transmission axis.
 39. **Keep the e-reporting axes** — `transactionReporting` and
     `paymentReporting` are the obligations, and they hold whether or not the
     invoice travelled the network. `obligationReasons` says why each axis
     carries what it carries, and `foreignTaxReviewRequired` flags an operation
     whose foreign tax must be reviewed outside Facturino.
+
+**Deposit invoice (386)** — the same rule, at its strongest. A deposit is
+deducted as PREPAID (BT-113), and an amount is only prepaid once it has actually
+been collected. The deposit is therefore decided, then **issued settled** — its
+finalization carries the full decided amount — before it is attached to the
+balance invoice. Issued acquitted, the deposit never exists unpaid, so it can
+never be deducted before it was settled. The balance invoice then deducts it and
+splits what remains due into instalments.
 
 **Credit note on a decided invoice** — `creditNotes.create` with
 `creditedLines`. The rate, the category, the VATEX code and the legal mention

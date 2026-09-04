@@ -112,7 +112,9 @@ func (r *Runner) StepCreditNote(ctx context.Context) error {
 		ReasonCode:       "other",
 		Reason:           "Geste commercial sur la prestation de mise en place.",
 		CreditedLines: []*facturino.CreditedLineParams{
-			{TaxLineRef: "mise-en-place", AmountTTC: 6000}, // 50,00 EUR HT + TVA
+			// The reference of a line ON THE CREDITED INVOICE: it is
+			// server-assigned when the invoice comes from a converted quote.
+			{TaxLineRef: r.state.MainLineRef, AmountTTC: 6000}, // 50,00 EUR HT + TVA
 		},
 		Dates:          &facturino.CreditNoteDates{Issued: today()},
 		IdempotencyKey: r.idemKey("credit-note"),

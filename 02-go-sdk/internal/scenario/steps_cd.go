@@ -239,6 +239,10 @@ func (r *Runner) StepInvoiceLifecycle(ctx context.Context) error {
 			return err
 		}
 		r.log.OK("decision %s bound to the converted draft %s", decision.ID, inv.ID)
+		if r.state.ConvertedDraft == nil || len(r.state.ConvertedDraft.Lines) == 0 {
+			return fmt.Errorf("converted draft %s carries no line to credit later", inv.ID)
+		}
+		r.state.MainLineRef = r.state.ConvertedDraft.Lines[0].Reference
 	} else {
 		// No quote ran: the invoice is created directly from its own decision.
 		if r.state.MainDecisionID == "" {
@@ -267,6 +271,7 @@ func (r *Runner) StepInvoiceLifecycle(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		r.state.MainLineRef = mainOperationLines(r)[0].Reference
 	}
 	r.state.InvoiceID = inv.ID
 	r.log.OK("draft invoice %s taxSource=%s", inv.ID, inv.TaxSource)

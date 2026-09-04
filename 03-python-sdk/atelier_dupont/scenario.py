@@ -424,6 +424,10 @@ def phase_d_invoice(client: facturino.Client, log: list[dict[str, Any]], state: 
     )
     invoice_id = invoice["id"]
     state["invoice_id"] = invoice_id
+    # A credit note references the lines of the invoice it credits, and those
+    # references are server-assigned at conversion — so the one phase F credits
+    # is read from the document, never spelled out.
+    state["main_line_ref"] = commercial["lines"][0]["reference"]
 
     run_step("D9 invoices.get", lambda: client.invoices.get(invoice_id), log)
     finalized = run_step("D9 invoices.finalize", lambda: client.invoices.finalize(invoice_id), log)
@@ -686,10 +690,23 @@ def phase_k_tax_decision(client: facturino.Client, log: list[dict[str, Any]], st
         log,
     )
 
-    # K.9 — Finalize: the number is assigned and the content is fixed.
+    # K.9 — Finalize WITH the collection. The money was received at K.5 and
+    # verified at K.7, so the invoice is issued acquitted: the number and the
+    # payment are applied in the SAME transaction, and the original Factur-X is
+    # rendered on a settled document instead of one that says "to pay". A
+    # collection above what is due is refused (payment_exceeds_amount_due) and
+    # the invoice then stays a draft — no number is burned.
     invoice = run_step(
-        "K invoices.finalize",
-        lambda: client.invoices.finalize(draft["id"]),
+        "K invoices.finalize (with the collection)",
+        lambda: client.invoices.finalize(
+            draft["id"],
+            payment={
+                "amount": settlement["amount"],
+                "method": settlement["method"],
+                "reference": settlement["reference"],
+                "paid_at": settlement["paid_at"],
+            },
+        ),
         log,
     )
     state["tax_decision_id"] = source["id"]
@@ -710,23 +727,24 @@ def phase_k_tax_decision(client: facturino.Client, log: list[dict[str, Any]], st
             },
         })
 
-    # K.11 — Record the REAL collection on the invoice, with its real date, its
-    # real method and the reference that carries the decision id. The payment
-    # axis moves; the transmission axis does not.
+    # K.11 — Read the ledger back. Nothing is recorded here: the collection was
+    # applied with the finalization, so this only proves it is there, with the
+    # reference that carries the decision id.
+    ledger = run_step(
+        "K payments.list (the collection applied at finalization)",
+        lambda: client.payments.list(invoice["id"]),
+        log,
+    )
+    log.append({
+        "step": "K collection on the ledger",
+        "ok": True,
+        "detail": [
+            {"amount": entry.get("amount"), "method": entry.get("method"),
+             "reference": entry.get("reference")}
+            for entry in ledger.data
+        ],
+    })
     settled = invoice
-    try:
-        client.payments.create(
-            invoice["id"],
-            amount=settlement["amount"],
-            method=settlement["method"],
-            reference=settlement["reference"],
-            paidAt=settlement["paid_at"],
-        )
-        settled = client.invoices.get(invoice["id"])
-        log.append({"step": "K payments.create", "ok": True,
-                    "detail": {"paymentStatus": settled.get("paymentStatus")}})
-    except Exception as err:  # noqa: BLE001 — the demo reports, it never crashes
-        log.append({"step": "K payments.create", "ok": False, "detail": str(err)})
 
     # K.12 — Keep the reporting axes: they are the obligations, and they hold
     # whether or not the invoice travelled the network.
@@ -738,9 +756,13 @@ def phase_k_tax_decision(client: facturino.Client, log: list[dict[str, Any]], st
             "paymentReporting": source.get("paymentReporting"),
             "obligationReasons": source.get("obligationReasons", []),
             "foreignTaxReviewRequired": source.get("foreignTaxReviewRequired"),
+            # The three axes, read off the invoice AS ISSUED — already settled.
             "documentStatus": settled.get("documentStatus"),
             "transmissionStatus": settled.get("transmissionStatus"),
             "paymentStatus": settled.get("paymentStatus"),
+            "expectedPaymentStatus": "paid",
+            # The REAL collection date, carried by the invoice itself.
+            "paidAt": (settled.get("dates") or {}).get("paidAt"),
         },
     })
 
@@ -813,9 +835,10 @@ def phase_k_deposit_and_schedule(client: facturino.Client, log: list[dict[str, A
 
     The order matters and is the point: a deposit is deducted as PREPAID
     (BT-113), and an amount is only prepaid once it has actually been collected.
-    The deposit is therefore created, finalized, and its payment recorded IN FULL
-    before it is attached to the balance invoice. A deposit that is merely
-    finalized has been invoiced, not paid.
+    The deposit is therefore decided, then ISSUED SETTLED — finalization and full
+    payment in one call — before it is attached to the balance invoice. A deposit
+    that is merely finalized has been invoiced, not paid; issued acquitted, it
+    never exists in that state at all.
 
     The schedule is validated against the amount that remains DUE — the total
     less the prepaid deposit — never against the gross total.
@@ -853,21 +876,27 @@ def phase_k_deposit_and_schedule(client: facturino.Client, log: list[dict[str, A
         ),
         log,
     )
-    deposit = run_step("K invoices.finalize (deposit)", lambda: client.invoices.finalize(deposit_draft["id"]), log)
-
-    # Record the payment IN FULL — exactly the decided amount. Until this
-    # happens the deposit is not prepaid, and must not be deducted.
-    run_step(
-        "K payments.create (deposit settled in full)",
-        lambda: client.payments.create(
-            deposit["id"],
-            amount=deposit_decision["amountToCharge"],
-            method="transfer",
-            paidAt=ISSUED_ON,
+    # Finalize WITH the payment IN FULL — exactly the decided amount, in a
+    # single call. An amount is only prepaid once it has been collected, and
+    # issuing the deposit acquitted is the strongest form of that rule: the
+    # deposit never exists unpaid, so it can never be deducted before it was
+    # settled.
+    deposit = run_step(
+        "K invoices.finalize (deposit, issued settled in full)",
+        lambda: client.invoices.finalize(
+            deposit_draft["id"],
+            payment={
+                "amount": deposit_decision["amountToCharge"],
+                "method": "transfer",
+                "reference": deposit_decision["id"],
+                "paid_at": ISSUED_ON,
+            },
         ),
         log,
     )
-    settled = run_step("K invoices.get (deposit)", lambda: client.invoices.get(deposit["id"]), log)
+
+    # The settlement is read off the ISSUED deposit, not fetched afterwards.
+    settled = deposit
     if settled.get("paymentStatus", settled.get("status")) != "paid":
         # Attaching an unsettled deposit would misstate BT-113.
         log.append({
@@ -876,6 +905,17 @@ def phase_k_deposit_and_schedule(client: facturino.Client, log: list[dict[str, A
             "detail": "the deposit is not paid; it is not attached to the balance invoice",
         })
         return
+    log.append({
+        "step": "K deposit issued settled",
+        "ok": True,
+        "detail": {
+            "number": settled.get("number"),
+            "depositSettled": True,
+            "paymentStatus": settled.get("paymentStatus"),
+            "paidAt": (settled.get("dates") or {}).get("paidAt"),
+            "note": "prepaid (BT-113) — it may now be deducted",
+        },
+    })
 
     balance_decision = _decide(
         client, log, customer_id,
@@ -1025,7 +1065,7 @@ def phase_f_credit_note(client: facturino.Client, log: list[dict[str, Any]], sta
             reasonCode="quality",
             reason="Geste commercial sur une demi-journee",
             dates={"issued": ISSUED_ON},
-            credited_lines=[{"taxLineRef": "prestation-jour", "amountTTC": 36000}],
+            credited_lines=[{"taxLineRef": state["main_line_ref"], "amountTTC": 36000}],
         ),
         log,
     )

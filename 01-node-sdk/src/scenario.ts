@@ -38,6 +38,14 @@ export class Scenario {
     private readonly config: Config,
   ) {}
 
+  /**
+   * A decided line reference of the invoice phase D issued. A credit note
+   * references the lines of the invoice it credits, and those references are
+   * assigned server-side when the invoice comes from a converted quote — so
+   * the one phase F credits is read from the document, never spelled out.
+   */
+  private mainLineRef = ''
+
   // ---------------------------------------------------------------------------
   // A. Bootstrap the SaaS account
   // ---------------------------------------------------------------------------
@@ -330,6 +338,11 @@ export class Scenario {
       { idempotencyKey: idempotencyKey('bind-decision', draftFromQuote.id) },
     )
     log.ok(`Decision ${decision.id} bound to the converted draft ${invoice.id} (${invoice.status})`)
+    const mainLine = commercial.lines[0]
+    if (!mainLine) {
+      throw new Error(`converted draft ${draftFromQuote.id} carries no line to credit later`)
+    }
+    this.mainLineRef = mainLine.reference
 
     invoice = await this.f.invoices.finalize(invoice.id, {
       idempotencyKey: idempotencyKey('invoice-finalize', invoice.id),
@@ -507,7 +520,9 @@ export class Scenario {
           creditNoteType: 'partial',
           reasonCode: 'quality',
           reason: 'Geste commercial — remise sur l’abonnement',
-          creditedLines: [{ taxLineRef: 'abo-mensuel', amountTTC: 1188 }],
+          // The reference of a line ON THE CREDITED INVOICE: it is assigned
+          // server-side when the invoice comes from a converted quote.
+          creditedLines: [{ taxLineRef: this.mainLineRef, amountTTC: 1188 }],
           dates: { issued: isoDate() },
         },
         { idempotencyKey: idempotencyKey('credit-note', invoice.id) },
@@ -1179,10 +1194,24 @@ export class Scenario {
       { idempotencyKey: idempotencyKey('tax-decision-invoice', source.id) },
     )
 
-    // K.9 — Finalize: the number is assigned and the content is fixed.
-    const invoice = await this.f.invoices.finalize(draft.id, {
-      idempotencyKey: idempotencyKey('tax-decision-invoice-fin', draft.id),
-    })
+    // K.9 — Finalize WITH the collection. The money was received at K.5 and
+    // verified at K.7, so the invoice is issued acquitted: the number and the
+    // payment are applied in the SAME transaction, and the original Factur-X
+    // is rendered on a settled document instead of one that says "to pay".
+    // The collection is refused (`payment_exceeds_amount_due`) if it exceeds
+    // what is due, and the invoice then stays a draft — no number is burned.
+    const invoice = await this.f.invoices.finalize(
+      draft.id,
+      {
+        payment: {
+          amount: settlement.amount,
+          method: settlement.method,
+          reference: settlement.reference,
+          paidAt: settlement.paidAt,
+        },
+      },
+      { idempotencyKey: idempotencyKey('tax-decision-invoice-fin', draft.id) },
+    )
     log.ok(`Invoice ${invoice.number} — taxSource=${invoice.taxSource}`)
 
     // K.10 — Send to the platform ONLY on the channel the decision states.
@@ -1209,34 +1238,22 @@ export class Scenario {
       log.warn('foreignTaxReviewRequired: a foreign tax may apply — review it outside Facturino')
     }
 
-    // K.12 — Record the REAL collection on the invoice, with its real date,
-    // its real method and the reference that carries the decision id. The
-    // payment axis moves; the transmission axis does not.
-    let settled = invoice
-    try {
-      await this.f.invoices.payments.create(
-        invoice.id,
-        {
-          amount: settlement.amount,
-          method: settlement.method,
-          reference: settlement.reference,
-          paidAt: settlement.paidAt,
-        },
-        { idempotencyKey: idempotencyKey('tax-decision-payment', invoice.id) },
-      )
-      settled = await this.f.invoices.get(invoice.id)
-      log.ok(`Collection recorded — payment axis ${settled.paymentStatus ?? 'unpaid'}`)
-    } catch (err) {
-      log.warn(`payments.create: ${describeError(err)}`)
+    // K.12 — Read the ledger back. Nothing is recorded here: the collection
+    // was applied with the finalization, so this only proves it is there, with
+    // the reference that carries the decision id.
+    const ledger = await this.f.invoices.payments.list(invoice.id)
+    for (const entry of ledger.data) {
+      log.ok(`Collection on the ledger — ${eur(entry.amount)} by ${entry.method}, reference ${entry.reference}`)
     }
 
-    // Three status axes, read off the finalized invoice.
+    // Three status axes, read off the invoice AS ISSUED — already settled.
     log.info(
-      `Invoice axes — document=${settled.documentStatus ?? settled.status} ` +
-        `| transmission=${settled.transmissionStatus ?? 'not_applicable'} ` +
-        `| payment=${settled.paymentStatus ?? 'unpaid'}`,
+      `Invoice axes — document=${invoice.documentStatus ?? invoice.status} ` +
+        `| transmission=${invoice.transmissionStatus ?? 'not_applicable'} ` +
+        `| payment=${invoice.paymentStatus ?? 'unpaid'} (expected paid)`,
     )
-    return settled
+    log.info(`Settled on ${invoice.dates.paidAt ?? '—'} — dates.paidAt is the REAL collection date`)
+    return invoice
   }
 
   /**
@@ -1244,10 +1261,11 @@ export class Scenario {
    *
    * The order matters and is the point of this block: a deposit is deducted as
    * PREPAID (BT-113), and an amount is only prepaid once it has actually been
-   * collected. So the deposit is decided, invoiced, finalized, and its payment
-   * is recorded IN FULL before it is attached to the balance invoice. A
-   * deposit that is merely finalized has been invoiced, not paid, and
-   * presenting it as prepaid would overstate what the buyer already settled.
+   * collected. So the deposit is decided, then ISSUED SETTLED — finalization
+   * and full payment in one call — before it is attached to the balance
+   * invoice. A deposit that is merely finalized has been invoiced, not paid,
+   * and presenting it as prepaid would overstate what the buyer already
+   * settled; issued acquitted, the deposit never exists in that state at all.
    *
    * Deposits and schedule are settled SERVER-SIDE against the decided amount:
    * the deposit seeds `amountPaid` (BT-113) and lowers `amountDue` (BT-115),
@@ -1279,31 +1297,35 @@ export class Scenario {
       { idempotencyKey: idempotencyKey('deposit-draft', customer.id) },
     )
 
-    // 2. Finalize: the deposit is now a numbered, legal invoice.
-    const deposit = await this.f.invoices.finalize(depositDraft.id, {
-      idempotencyKey: idempotencyKey('deposit-final', depositDraft.id),
-    })
-    log.ok(`Deposit ${deposit.number} — ${eur(depositDecision.amountToCharge)} invoiced`)
-
-    // 3. Record its payment IN FULL — exactly the decided amount. Until this
-    //    happens the deposit is not prepaid, and must not be deducted.
-    await this.f.invoices.payments.create(
-      deposit.id,
+    // 2. Finalize WITH the payment IN FULL — exactly the decided amount, in a
+    //    single call. An amount is only prepaid once it has been collected, and
+    //    issuing the deposit acquitted is the strongest form of that rule: the
+    //    deposit never exists unpaid, so it can never be deducted before it was
+    //    settled.
+    const deposit = await this.f.invoices.finalize(
+      depositDraft.id,
       {
-        amount: depositDecision.amountToCharge,
-        method: 'transfer',
-        reference: depositDecision.id,
-        paidAt: isoDate(),
+        payment: {
+          amount: depositDecision.amountToCharge,
+          method: 'transfer',
+          reference: depositDecision.id,
+          paidAt: isoDate(),
+        },
       },
-      { idempotencyKey: idempotencyKey('deposit-payment', deposit.id) },
+      { idempotencyKey: idempotencyKey('deposit-final', depositDraft.id) },
     )
-    const settled = await this.f.invoices.get(deposit.id)
-    if ((settled.paymentStatus ?? settled.status) !== 'paid') {
+    log.ok(`Deposit ${deposit.number} — ${eur(depositDecision.amountToCharge)} issued settled`)
+
+    // 3. The settlement is read off the ISSUED deposit, not fetched afterwards.
+    if ((deposit.paymentStatus ?? deposit.status) !== 'paid') {
       // Attaching an unsettled deposit would misstate BT-113.
       log.warn(`Deposit ${deposit.number} is not settled — not attaching it to the balance invoice`)
       return
     }
-    log.ok(`Deposit ${deposit.number} settled — it may now be deducted as prepaid (BT-113)`)
+    log.ok(
+      `Deposit ${deposit.number} settled on ${deposit.dates.paidAt ?? '—'} ` +
+        '— it may now be deducted as prepaid (BT-113)',
+    )
 
     // 4. Decide the balance operation, then create the invoice deducting the
     //    SETTLED deposit and splitting what remains into instalments. The

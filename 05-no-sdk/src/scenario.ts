@@ -72,7 +72,9 @@ interface CommercialDraft {
 interface Invoice extends Identified {
   status?: string;
   number?: string | null;
-  dates?: { issued?: string; due?: string };
+  // `paidAt` is the REAL settlement date: the paidAt of the collection that
+  // cleared the balance. Absent while an amount remains due.
+  dates?: { issued?: string; due?: string; paidAt?: string };
   totals?: { totalTTC?: string; amountDue?: string; amountPaid?: string };
   /**
    * The operation a COMMERCIAL draft states, before any decision. Present while
@@ -232,6 +234,8 @@ interface ScenarioContext {
   decidedInvoiceId?: string;
   depositInvoiceId?: string;
   mainDecisionId?: string;
+  /** Référence d'une ligne décidée de `invoiceId` — celle que l'avoir crédite. */
+  mainLineRef?: string;
   /**
    * Le brouillon COMMERCIAL produit par la conversion du devis, son bloc
    * commercial block and its issue date: phase D decides that operation and
@@ -507,7 +511,15 @@ export class Scenario {
       await this.client.post(
         '/customers/import',
         {
-          csv: 'name,type,siret,line1,postalCode,city,country\nBoulangerie Martin,company,55208131766522,3 av. Gambetta,69003,Lyon,FR\n',
+          // Column names are the ones customers.exportCsv emits — an export must
+          // re-import as itself. An address stated under any other name is not
+          // read, and the customer lands with a placeholder one, which no tax
+          // decision can resolve a territory from. The SIRET is a DIFFERENT
+          // establishment: importing a second record under the scenario's own
+          // SIRET would shadow its customer on the next lookup-or-create.
+          csv:
+            'name,siret,address_line1,address_postal_code,address_city,address_country\n' +
+            'Boulangerie Martin,44306184100047,3 av. Gambetta,69003,Lyon,FR\n',
         },
         this.idem('customers.import', '55208131766522'),
       );
@@ -657,6 +669,10 @@ export class Scenario {
     if (!convertedId || !draft || !issuedOn) {
       throw new Error('aucun brouillon converti : le cycle devis ne peut pas se poursuivre');
     }
+    const mainLine = draft.lines[0];
+    if (!mainLine) {
+      throw new Error(`le brouillon converti ${convertedId} ne porte aucune ligne`);
+    }
 
     step('taxDecisions.create → POST /tax-decisions (operation of the converted draft)');
     const decision = await this.decideConvertedDraft(customerId, draft, issuedOn);
@@ -679,6 +695,10 @@ export class Scenario {
       this.idem('bind-decision', convertedId),
     );
     ctx.invoiceId = invoice.id;
+    // Un avoir référence les lignes de la facture qu'il annule, et ces
+    // références sont attribuées côté serveur à la conversion : celle que la
+    // phase F crédite est relue du document, jamais écrite en dur.
+    ctx.mainLineRef = mainLine.reference;
     detail(`invoice=${invoice.id} status=${invoice.status} taxSource=${invoice.taxSource}`);
     const invoiceId = ctx.invoiceId;
 
@@ -1090,12 +1110,24 @@ export class Scenario {
       return;
     }
 
-    // K.9 — Finalize: the number is assigned and the content is fixed.
-    step('invoices.finalize → POST /invoices/{id}/finalize');
+    // K.9 — Finalize WITH the collection. The money was received at K.5 and
+    // verified at K.7, so the invoice is issued acquitted: the number and the
+    // payment are applied in the SAME transaction, and the original Factur-X
+    // is rendered on a settled document instead of one that says "to pay". A
+    // collection above what is due is refused (payment_exceeds_amount_due) and
+    // the invoice then stays a draft — no number is burned.
+    step('invoices.finalize → POST /invoices/{id}/finalize (body: { payment })');
     try {
       const finalized = await this.client.post<Invoice>(
         `/invoices/${invoiceId}/finalize`,
-        undefined,
+        {
+          payment: {
+            amount: settlement.amount,
+            method: settlement.method,
+            reference: settlement.reference,
+            paidAt: settlement.paidAt,
+          },
+        },
         this.idem('decided-invoice-finalize', invoiceId),
       );
       ctx.decidedInvoiceId = finalized.id;
@@ -1103,8 +1135,9 @@ export class Scenario {
         `invoice=${finalized.number} taxSource=${finalized.taxSource} | ` +
           `axes document=${finalized.documentStatus ?? finalized.status} ` +
           `transmission=${finalized.transmissionStatus ?? 'not_applicable'} ` +
-          `payment=${finalized.paymentStatus ?? 'unpaid'}`,
+          `payment=${finalized.paymentStatus ?? 'unpaid'} (expected paid)`,
       );
+      detail(`settled on ${finalized.dates?.paidAt ?? '—'} — dates.paidAt is the REAL collection date`);
     } catch (err) {
       this.fiscalError('invoices.finalize (decision-backed)', err);
       return;
@@ -1132,24 +1165,19 @@ export class Scenario {
       );
     }
 
-    // K.11 — Record the REAL collection on the invoice, with its real date, its
-    // real method and the reference that carries the decision id. The payment
-    // axis moves; the transmission axis does not.
-    step('payments.create → POST /invoices/{id}/payments');
+    // K.11 — Read the ledger back. Nothing is recorded here: the collection was
+    // applied with the finalization, so this only proves it is there, with the
+    // reference that carries the decision id.
+    step('payments.list → GET /invoices/{id}/payments');
     try {
-      await this.client.post(
+      const ledger = await this.client.get<{ data: Array<{ amount: number; method: string; reference: string | null }> }>(
         `/invoices/${ctx.decidedInvoiceId ?? invoiceId}/payments`,
-        {
-          amount: settlement.amount,
-          method: settlement.method,
-          reference: settlement.reference,
-          paidAt: settlement.paidAt,
-        },
-        this.idem('decided-invoice-payment', ctx.decidedInvoiceId ?? invoiceId),
       );
-      detail(`payment recorded - reference=${settlement.reference}`);
+      for (const entry of ledger.data) {
+        detail(`collection on the ledger - ${entry.amount} cents by ${entry.method}, reference=${entry.reference ?? '—'}`);
+      }
     } catch (err) {
-      this.fiscalError('payments.create (decision-backed)', err);
+      this.fiscalError('payments.list (decision-backed)', err);
     }
 
     // K.12 — Keep the reporting axes: they are the obligations, and they hold
@@ -1361,9 +1389,10 @@ export class Scenario {
    *
    * The ORDER is the point: a deposit may only ever be deducted as PREPAID
    * (BT-113), and an amount is only prepaid once it has actually been
-   * collected. The deposit is therefore decided, invoiced, and PAID IN FULL
-   * here, and only then deducted from the balance invoice: `deposits` and
-   * `schedule` settle SERVER-SIDE against the decided amount due.
+   * collected. The deposit is therefore decided, then ISSUED SETTLED —
+   * finalization and full payment in one call — and only then deducted from the
+   * balance invoice: `deposits` and `schedule` settle SERVER-SIDE against the
+   * decided amount due. Issued acquitted, the deposit never exists unpaid.
    */
   private async decidedDeposit(ctx: ScenarioContext, customerId: string): Promise<void> {
     // --- the deposit -------------------------------------------------------
@@ -1423,43 +1452,39 @@ export class Scenario {
         },
         this.idem('deposit-draft', customerId),
       );
+      // Finalize WITH the payment IN FULL — exactly the decided amount, in a
+      // single call. An amount is only prepaid once it has been collected, and
+      // issuing the deposit acquitted is the strongest form of that rule: the
+      // deposit never exists unpaid, so it can never be deducted before it was
+      // settled.
       const deposit = await this.client.post<Invoice>(
         `/invoices/${draft.id}/finalize`,
-        undefined,
+        {
+          payment: {
+            amount: depositDecision.amountToCharge,
+            method: 'transfer',
+            // The real bank reference of the movement, not the decision id.
+            reference: 'VIR/2026/000872',
+            paidAt: this.today(),
+          },
+        },
         this.idem('deposit-finalize', draft.id),
       );
       depositId = deposit.id;
       ctx.depositInvoiceId = deposit.id;
-      detail(`deposit=${deposit.number} invoiced`);
-    } catch (err) {
-      this.fiscalError('invoices.create (deposit)', err);
-      return;
-    }
+      detail(`deposit=${deposit.number} issued settled`);
 
-    // Record the payment IN FULL. Until this happens the deposit is not
-    // prepaid, and must not be deducted from anything.
-    step('payments.create -> POST /invoices/{deposit}/payments (settled in full)');
-    try {
-      await this.client.post(
-        `/invoices/${depositId}/payments`,
-        {
-          amount: depositDecision.amountToCharge,
-          method: 'transfer',
-          // The real bank reference of the movement, not the decision id.
-          reference: 'VIR/2026/000872',
-          paidAt: this.today(),
-        },
-        this.idem('deposit-payment', depositId),
-      );
-      const settled = await this.client.get<Invoice>(`/invoices/${depositId}`);
-      if ((settled.paymentStatus ?? settled.status) !== 'paid') {
+      // The settlement is read off the ISSUED deposit, not fetched afterwards.
+      if ((deposit.paymentStatus ?? deposit.status) !== 'paid') {
         // Deducting an unsettled deposit anywhere would misstate BT-113.
         detail('deposit unpaid: it must not be deducted from any balance invoice');
         return;
       }
-      detail('deposit settled - it may now be deducted as prepaid (BT-113)');
+      detail(
+        `deposit settled on ${deposit.dates?.paidAt ?? '—'} - it may now be deducted as prepaid (BT-113)`,
+      );
     } catch (err) {
-      this.fiscalError('payments.create (deposit)', err);
+      this.fiscalError('invoices.create (deposit)', err);
       return;
     }
 
@@ -1578,7 +1603,9 @@ export class Scenario {
           reasonCode: 'quality',
           reason: 'Geste commercial — 1 heure offerte',
           creditedLines: [
-            { taxLineRef: 'conseil-heure', amountTTC: 15600 }, // 130,00 € HT + TVA
+            // La référence d'une ligne DE LA FACTURE créditée : elle est
+            // attribuée côté serveur quand la facture vient d'un devis.
+            { taxLineRef: ctx.mainLineRef, amountTTC: 15600 }, // 130,00 € HT + TVA
           ],
           dates: { issued: this.today() },
         },

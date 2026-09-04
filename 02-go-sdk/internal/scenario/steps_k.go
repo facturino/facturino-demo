@@ -135,10 +135,21 @@ func (r *Runner) StepTaxDecision(ctx context.Context) error {
 		return fmt.Errorf("invoices.Create (decision-backed): %w", err)
 	}
 
-	// 8. Finalize: the number is assigned and the content is fixed.
-	finalized, err := r.client.Invoices.Finalize(invoice.ID)
+	// 8. Finalize WITH the collection. The money was received at step 5 and
+	// verified at step 7, so the invoice is issued acquitted: the number and
+	// the payment are applied in the SAME transaction, and the original
+	// Factur-X is rendered on a settled document instead of one that says "to
+	// pay". A collection above what is due is refused
+	// (payment_exceeds_amount_due) and the invoice stays a draft — no number
+	// is burned.
+	finalized, err := r.client.Invoices.FinalizeWithPayment(invoice.ID, &facturino.PaymentParams{
+		Amount:    amountToCharge,
+		Method:    settlementMethod,
+		Reference: settlementReference,
+		PaidAt:    today(),
+	})
 	if err != nil {
-		return fmt.Errorf("invoices.Finalize: %w", err)
+		return fmt.Errorf("invoices.FinalizeWithPayment: %w", err)
 	}
 	r.log.OK("invoice %s — taxSource=%s", finalized.Number, finalized.TaxSource)
 
@@ -167,25 +178,23 @@ func (r *Runner) StepTaxDecision(ctx context.Context) error {
 		r.log.Warnf("foreignTaxReviewRequired: a foreign tax may apply — review it outside Facturino")
 	}
 
-	// 11. Record the REAL collection on the invoice, with its real date, its
-	// real method and the reference that carries the decision id. The payment
-	// axis moves; the transmission axis does not.
-	settled := finalized
-	if _, err := r.client.Payments.Create(finalized.ID, &facturino.PaymentParams{
-		Amount:    amountToCharge,
-		Method:    settlementMethod,
-		Reference: settlementReference,
-		PaidAt:    today(),
-	}); err != nil {
-		r.log.Warnf("payments.Create: %v", err)
-	} else if refreshed, err := r.client.Invoices.Get(finalized.ID); err == nil {
-		settled = refreshed
-		r.log.OK("collection recorded — payment axis %s", settled.PaymentStatus)
+	// 11. Read the ledger back. Nothing is recorded here: the collection was
+	// applied with the finalization, so this only proves it is there, with the
+	// reference that carries the decision id.
+	ledger := r.client.Payments.List(finalized.ID, nil)
+	for ledger.Next() {
+		entry := ledger.Payment()
+		r.log.OK("collection on the ledger — %d cents by %s, reference %s",
+			entry.Amount, entry.Method, entry.Reference)
+	}
+	if err := ledger.Err(); err != nil {
+		return fmt.Errorf("payments.List: %w", err)
 	}
 
-	// The three status axes, read off the invoice.
-	r.log.Infof("invoice axes — document=%s | transmission=%s | payment=%s",
-		settled.DocumentStatus, settled.TransmissionStatus, settled.PaymentStatus)
+	// The three status axes, read off the invoice AS ISSUED — already settled.
+	r.log.Infof("invoice axes — document=%s | transmission=%s | payment=%s (expected paid)",
+		finalized.DocumentStatus, finalized.TransmissionStatus, finalized.PaymentStatus)
+	r.log.Infof("settled on %s — dates.paidAt is the REAL collection date", invoicePaidAt(finalized))
 
 	r.state.TaxDecisionID = source.ID
 	r.state.DecidedInvoiceID = finalized.ID
@@ -212,6 +221,7 @@ func (r *Runner) StepDecidedCreditNote(ctx context.Context) error {
 		// Either Quantity or AmountTTC, never both. Leaving both empty credits
 		// the line's whole remaining balance.
 		CreditedLines:  []*facturino.CreditedLineParams{{TaxLineRef: "abo-pro", AmountTTC: 1200}},
+		Dates:          &facturino.CreditNoteDates{Issued: today()},
 		IdempotencyKey: r.idemKey("decided-credit-note"),
 	})
 	if err != nil {
@@ -267,6 +277,14 @@ func (r *Runner) StepDecidedRecurring(ctx context.Context) error {
 	return nil
 }
 
+// invoicePaidAt renders the REAL settlement date carried by the invoice.
+func invoicePaidAt(invoice *facturino.Invoice) string {
+	if invoice.Dates == nil || invoice.Dates.PaidAt == "" {
+		return "—"
+	}
+	return invoice.Dates.PaidAt
+}
+
 // deref renders an optional string field, defaulting to "none".
 func deref(value *string) string {
 	if value == nil {
@@ -280,10 +298,11 @@ func deref(value *string) string {
 //
 // The order matters and is the point of this step: a deposit is deducted as
 // PREPAID (BT-113), and an amount is only prepaid once it has actually been
-// collected. So the deposit is created, finalized, and its payment is recorded
-// IN FULL before it is attached to the balance invoice. A deposit that is
-// merely finalized has been invoiced, not paid, and presenting it as prepaid
-// would overstate what the buyer already settled.
+// collected. So the deposit is decided, then ISSUED SETTLED — finalization and
+// full payment in one call — before it is attached to the balance invoice. A
+// deposit that is merely finalized has been invoiced, not paid, and presenting
+// it as prepaid would overstate what the buyer already settled; issued
+// acquitted, the deposit never exists in that state at all.
 //
 // The schedule is validated against the amount that remains DUE — the total
 // less the prepaid deposit — never against the gross total.
@@ -328,34 +347,31 @@ func (r *Runner) StepDepositAndSchedule(ctx context.Context) error {
 		return fmt.Errorf("invoices.Create (deposit): %w", err)
 	}
 
-	// 2. Finalize: the deposit is now a numbered, legal invoice.
-	deposit, err := r.client.Invoices.Finalize(depositDraft.ID)
-	if err != nil {
-		return fmt.Errorf("invoices.Finalize (deposit): %w", err)
-	}
-	r.log.OK("deposit %s invoiced", deposit.Number)
-
-	// 3. Record its payment IN FULL — exactly the decided amount. Until this
-	// happens the deposit is not prepaid, and must not be deducted.
-	if _, err := r.client.Payments.Create(deposit.ID, &facturino.PaymentParams{
+	// 2. Finalize WITH the payment IN FULL — exactly the decided amount, in a
+	// single call. An amount is only prepaid once it has been collected, and
+	// issuing the deposit acquitted is the strongest form of that rule: the
+	// deposit never exists unpaid, so it can never be deducted before it was
+	// settled.
+	deposit, err := r.client.Invoices.FinalizeWithPayment(depositDraft.ID, &facturino.PaymentParams{
 		Amount:         *depositDecision.AmountToCharge,
 		Method:         "transfer",
+		Reference:      depositDecision.ID,
 		PaidAt:         today(),
-		IdempotencyKey: r.idemKey("deposit-payment"),
-	}); err != nil {
-		return fmt.Errorf("payments.Create (deposit): %w", err)
-	}
-
-	settled, err := r.client.Invoices.Get(deposit.ID, nil)
+		IdempotencyKey: r.idemKey("deposit-final"),
+	})
 	if err != nil {
-		return fmt.Errorf("invoices.Get (deposit): %w", err)
+		return fmt.Errorf("invoices.FinalizeWithPayment (deposit): %w", err)
 	}
-	if settled.PaymentStatus != "paid" && settled.Status != "paid" {
+	r.log.OK("deposit %s issued settled", deposit.Number)
+
+	// 3. The settlement is read off the ISSUED deposit, not fetched afterwards.
+	if deposit.PaymentStatus != "paid" && deposit.Status != "paid" {
 		// Attaching an unsettled deposit would misstate BT-113.
 		r.log.Warnf("deposit %s is not settled — not attaching it to the balance invoice", deposit.Number)
 		return nil
 	}
-	r.log.OK("deposit %s settled — it may now be deducted as prepaid (BT-113)", deposit.Number)
+	r.log.OK("deposit %s settled on %s — it may now be deducted as prepaid (BT-113)",
+		deposit.Number, invoicePaidAt(deposit))
 
 	// 4. Decide the balance operation, then deduct the SETTLED deposit and
 	// split what remains into instalments. Deposits and schedule settle

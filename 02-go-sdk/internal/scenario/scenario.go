@@ -62,15 +62,20 @@ type State struct {
 	ConvertedDraft    *facturino.CommercialDraft `json:"converted_draft,omitempty"`
 	ConvertedIssuedOn string                     `json:"converted_issued_on,omitempty"`
 	InvoiceID         string                     `json:"invoice_id,omitempty"`
-	InvoiceNumber     string                     `json:"invoice_number,omitempty"`
-	RecurringID       string                     `json:"recurring_id,omitempty"`
-	CreditNoteID      string                     `json:"credit_note_id,omitempty"`
-	ReceivedInvoiceID string                     `json:"received_invoice_id,omitempty"`
-	WebhookEndpointID string                     `json:"webhook_endpoint_id,omitempty"`
-	TaxDecisionID     string                     `json:"tax_decision_id,omitempty"`
-	DecidedInvoiceID  string                     `json:"decided_invoice_id,omitempty"`
-	DepositInvoiceID  string                     `json:"deposit_invoice_id,omitempty"`
-	MainDecisionID    string                     `json:"main_decision_id,omitempty"`
+	// MainLineRef is a decided line reference of InvoiceID. A credit note
+	// references the lines of the invoice it credits, and those references are
+	// server-assigned when the invoice comes from a converted quote — so the
+	// one that credits it is read from the document, never spelled out.
+	MainLineRef       string `json:"main_line_ref,omitempty"`
+	InvoiceNumber     string `json:"invoice_number,omitempty"`
+	RecurringID       string `json:"recurring_id,omitempty"`
+	CreditNoteID      string `json:"credit_note_id,omitempty"`
+	ReceivedInvoiceID string `json:"received_invoice_id,omitempty"`
+	WebhookEndpointID string `json:"webhook_endpoint_id,omitempty"`
+	TaxDecisionID     string `json:"tax_decision_id,omitempty"`
+	DecidedInvoiceID  string `json:"decided_invoice_id,omitempty"`
+	DepositInvoiceID  string `json:"deposit_invoice_id,omitempty"`
+	MainDecisionID    string `json:"main_decision_id,omitempty"`
 }
 
 // NewRunner builds a scenario runner. seed is mixed into idempotency keys;
