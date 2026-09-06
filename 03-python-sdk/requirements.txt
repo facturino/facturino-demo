@@ -1,5 +1,5 @@
 # Facturino Python SDK, from PyPI.
-facturino==2.3.0
+facturino==2.3.1
 #
 # The demo's HTTP server. Flask pulls in Werkzeug as a transitive dep.
 flask>=3.0

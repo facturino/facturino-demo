@@ -21,7 +21,7 @@ The SDK comes from the npm registry (see `package.json`):
 
 ```jsonc
 "dependencies": {
-  "@facturino/node": "^2.3.0"
+  "@facturino/node": "^2.4.0"
 }
 ```
 

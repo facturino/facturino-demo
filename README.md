@@ -55,14 +55,14 @@ Facturino events.
 > @facturino/node`, `pip install facturino`, `composer require
 > facturino/facturino-php`, `go get …`) work directly; each stack README
 > documents its pinned range. The scenario needs the SDK major that carries
-> the stable tax determination contract: `@facturino/node` 2.3.0, `facturino`
-> (Python) 2.3.0, `facturino/facturino-php` 2.3.0 and
-> `github.com/facturino/facturino-go/v2` v2.3.0. That version is what carries
+> the stable tax determination contract: `@facturino/node` 2.4.0, `facturino`
+> (Python) 2.3.1, `facturino/facturino-php` 2.3.1 and
+> `github.com/facturino/facturino-go/v2` v2.4.0. That major is what carries
 > `finalize` with a collection, so an invoice paid before it is issued comes out
 > already acquitted.
 >
 > **Lockfiles.** The committed lockfiles (`package-lock.json`, `go.sum`,
-> `composer.lock`) resolve the published 2.3.0 SDKs. A fresh install therefore
+> `composer.lock`) resolve the published SDKs named above. A fresh install therefore
 > reproduces the stable tax determination contract demonstrated here without
 > any local SDK checkout or repository override.
 
