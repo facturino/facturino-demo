@@ -246,6 +246,27 @@ interface ScenarioContext {
   convertedIssuedOn?: string | null;
 }
 
+/** `POST /invoices/{id}/send` answers 202 with the summary only; the axes are read back on the invoice. */
+type SendResult = { id: string; object: 'invoice'; status: string };
+type SentInvoice = {
+  status?: string;
+  transmissionStatus?: string;
+  einvoicing?: { paStatus?: string | null; paErrorCode?: string | null; rejectionReason?: string | null } | null;
+};
+
+/** Describe where a sent invoice stands, without presuming a deposit the platform has not confirmed. */
+function describeSend(invoice: SentInvoice): string {
+  const transmission = invoice.transmissionStatus ?? invoice.status ?? 'unknown';
+  const platform = invoice.einvoicing?.paStatus ?? 'none';
+  if (transmission === 'rejected') {
+    const reason = invoice.einvoicing?.rejectionReason ?? invoice.einvoicing?.paErrorCode ?? 'no reason given';
+    return `rejected by the platform: ${reason}`;
+  }
+  if (transmission === 'sending') return `handed to the platform (paStatus=${platform}) — deposit to be confirmed`;
+  if (transmission === 'pending') return 'not handed to the platform: transmission still pending';
+  return `transmissionStatus=${transmission}, paStatus=${platform}`;
+}
+
 export class Scenario {
   private readonly client: FacturinoClient;
   private readonly config: Config;
@@ -750,12 +771,16 @@ export class Scenario {
     // D.11 — Deposit to the PA.
     step(`invoices.send → POST /invoices/${invoiceId}/send (deposit to the PA)`);
     try {
-      await this.client.post(
+      const sent = await this.client.post<SendResult>(
         `/invoices/${invoiceId}/send`,
         undefined,
         this.idem('invoice.send', invoiceId),
       );
-      detail('deposited to the PA');
+      // `send` hands the file to the platform and answers with the summary
+      // only; the deposit is confirmed by the platform later (webhook or status
+      // check), never presumed here. The axes are read back on the invoice.
+      detail(`send accepted (status=${sent.status})`);
+      detail(describeSend(await this.client.get<SentInvoice>(`/invoices/${invoiceId}`)));
     } catch (err) {
       this.softError('invoices.send', err);
     }
@@ -1147,12 +1172,13 @@ export class Scenario {
     if (source.invoiceChannel === 'einvoicing') {
       step('invoices.send → POST /invoices/{id}/send');
       try {
-        await this.client.post(
+        const sent = await this.client.post<SendResult>(
           `/invoices/${ctx.decidedInvoiceId}/send`,
           undefined,
           this.idem('decided-invoice-send', ctx.decidedInvoiceId ?? invoiceId),
         );
-        detail('deposited on the platform (invoiceChannel = einvoicing)');
+        detail(`send accepted (status=${sent.status}, invoiceChannel = einvoicing)`);
+        detail(describeSend(await this.client.get<SentInvoice>(`/invoices/${ctx.decidedInvoiceId}`)));
       } catch (err) {
         this.fiscalError('invoices.send (decision-backed)', err);
       }
