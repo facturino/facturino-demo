@@ -8,16 +8,16 @@
     "packages": [
         {
             "name": "facturino/facturino-php",
-            "version": "v2.3.1",
+            "version": "v2.4.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/facturino/facturino-php.git",
-                "reference": "f35cd76c43f1dfd8fc274f9eea681c6774cb1b7a"
+                "reference": "6ad3990bc16c1a0efd29bea89232aa8b0850bdb2"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/facturino/facturino-php/zipball/f35cd76c43f1dfd8fc274f9eea681c6774cb1b7a",
-                "reference": "f35cd76c43f1dfd8fc274f9eea681c6774cb1b7a",
+                "url": "https://api.github.com/repos/facturino/facturino-php/zipball/6ad3990bc16c1a0efd29bea89232aa8b0850bdb2",
+                "reference": "6ad3990bc16c1a0efd29bea89232aa8b0850bdb2",
                 "shasum": ""
             },
             "require": {
@@ -57,9 +57,9 @@
             ],
             "support": {
                 "issues": "https://github.com/facturino/facturino-php/issues",
-                "source": "https://github.com/facturino/facturino-php/tree/v2.3.1"
+                "source": "https://github.com/facturino/facturino-php/tree/v2.4.0"
             },
-            "time": "2026-09-06T01:51:23+00:00"
+            "time": "2026-09-06T09:53:12+00:00"
         }
     ],
     "packages-dev": [],

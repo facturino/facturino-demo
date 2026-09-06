@@ -33,7 +33,7 @@ pip install -r requirements.txt
 `requirements.txt` installs the SDK from PyPI:
 
 ```text
-facturino==2.3.1
+facturino==2.4.0
 flask>=3.0
 ```
 
