@@ -18,7 +18,8 @@ function readRawBody(req: IncomingMessage): Promise<Buffer> {
 
 /** Dispatch a verified event to the matching handler. */
 function handleEvent(event: WebhookEvent): void {
-  const object = event.data.object
+  // `data` is the flat payload: `id` is the resource, `object` names its type.
+  const object = event.data.id
   switch (event.type) {
     case 'invoice.finalized':
       log.ok(`[webhook] invoice ${object} finalized → number assigned, archive sealed`)

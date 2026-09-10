@@ -1,5 +1,8 @@
 # Facturino demo — Node.js / TypeScript SDK
 
+SDK contract target: **2.7.0**, published and consumed here. Dependency manifests and lockfiles track the release train updates them.
+
+
 "Atelier Dupont", a French B2B SaaS that bills **100% through Facturino**, from
 the first quote to the accounting export. This demo runs the shared scenario
 (see [`../docs/SCENARIO.md`](../docs/SCENARIO.md), steps A→K) using the official
@@ -21,7 +24,7 @@ The SDK comes from the npm registry (see `package.json`):
 
 ```jsonc
 "dependencies": {
-  "@facturino/node": "^2.5.0"
+  "@facturino/node": "^2.7.0"
 }
 ```
 

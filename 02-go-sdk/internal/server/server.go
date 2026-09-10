@@ -231,17 +231,14 @@ func (s *Server) dispatch(event *facturino.WebhookEvent) {
 	}
 }
 
-// objectID extracts data.object.id from the event envelope, tolerating the
-// loosely-typed map the SDK decodes the body into.
+// objectID extracts data.id from the event envelope, tolerating the
+// loosely-typed map the SDK decodes the body into. `data` is flat: `id` is the
+// resource identifier and `object` names its type.
 func objectID(data map[string]any) string {
 	if data == nil {
 		return ""
 	}
-	obj, ok := data["object"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	if id, ok := obj["id"].(string); ok {
+	if id, ok := data["id"].(string); ok {
 		return id
 	}
 	return ""

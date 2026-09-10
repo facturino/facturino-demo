@@ -1,5 +1,8 @@
 # Atelier Dupont — demo PHP (SDK Facturino)
 
+SDK contract target: **2.7.0**, published and consumed here. Dependency manifests and lockfiles track the release train updates them.
+
+
 A small B2B SaaS backend that bills end to end through the
 [Facturino API](https://facturino.com/docs/api) using the official
 [`facturino/facturino-php`](https://github.com/facturino/facturino-php) SDK.
@@ -30,7 +33,7 @@ composer install
 To add or refresh the dependency explicitly:
 
 ```bash
-composer require facturino/facturino-php:^2.3
+composer require facturino/facturino-php:^2.7.0
 ```
 
 ## Configure

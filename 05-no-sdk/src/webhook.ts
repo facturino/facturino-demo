@@ -30,8 +30,8 @@ export interface WebhookEvent<T = unknown> {
   /** ISO 8601 creation timestamp. */
   created: string;
   livemode: boolean;
-  /** The resource that changed lives under `data.object`. */
-  data: { object: T };
+  /** Flat payload: `id` is the resource, `object` names its type, then its fields. */
+  data: { id: string; object: string } & T;
   request?: { id?: string; idempotencyKey?: string } | null;
 }
 

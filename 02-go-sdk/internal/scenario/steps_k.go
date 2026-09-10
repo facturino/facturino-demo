@@ -151,7 +151,7 @@ func (r *Runner) StepTaxDecision(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("invoices.FinalizeWithPayment: %w", err)
 	}
-	r.log.OK("invoice %s — taxSource=%s", finalized.Number, finalized.TaxSource)
+	r.log.OK("invoice %s — taxSource=%s", deref(finalized.Number), finalized.TaxSource)
 
 	// 9. Send to the platform ONLY on the channel the decision states.
 	if source.InvoiceChannel != nil && *source.InvoiceChannel == "einvoicing" {
@@ -185,7 +185,7 @@ func (r *Runner) StepTaxDecision(ctx context.Context) error {
 	for ledger.Next() {
 		entry := ledger.Payment()
 		r.log.OK("collection on the ledger — %d cents by %s, reference %s",
-			entry.Amount, entry.Method, entry.Reference)
+			entry.Amount, entry.Method, deref(entry.Reference))
 	}
 	if err := ledger.Err(); err != nil {
 		return fmt.Errorf("payments.List: %w", err)
@@ -362,16 +362,16 @@ func (r *Runner) StepDepositAndSchedule(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("invoices.FinalizeWithPayment (deposit): %w", err)
 	}
-	r.log.OK("deposit %s issued settled", deposit.Number)
+	r.log.OK("deposit %s issued settled", deref(deposit.Number))
 
 	// 3. The settlement is read off the ISSUED deposit, not fetched afterwards.
 	if deposit.PaymentStatus != "paid" && deposit.Status != "paid" {
 		// Attaching an unsettled deposit would misstate BT-113.
-		r.log.Warnf("deposit %s is not settled — not attaching it to the balance invoice", deposit.Number)
+		r.log.Warnf("deposit %s is not settled — not attaching it to the balance invoice", deref(deposit.Number))
 		return nil
 	}
 	r.log.OK("deposit %s settled on %s — it may now be deducted as prepaid (BT-113)",
-		deposit.Number, invoicePaidAt(deposit))
+		deref(deposit.Number), invoicePaidAt(deposit))
 
 	// 4. Decide the balance operation, then deduct the SETTLED deposit and
 	// split what remains into instalments. Deposits and schedule settle
@@ -413,7 +413,7 @@ func (r *Runner) StepDepositAndSchedule(ctx context.Context) error {
 		return fmt.Errorf("invoices.Finalize (balance): %w", err)
 	}
 	r.log.OK("balance invoice %s — total %d | prepaid %d | due %d (centimes)",
-		balance.Number, balance.Totals.TotalTTC, balance.Totals.AmountPaid, balance.Totals.AmountDue)
+		deref(balance.Number), balance.Totals.TotalTTC, balance.Totals.AmountPaid, balance.Totals.AmountDue)
 
 	r.state.DepositInvoiceID = deposit.ID
 	return nil
@@ -480,7 +480,7 @@ func (r *Runner) StepIntegrationDecision(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("invoices.Finalize (integration): %w", err)
 	}
-	r.log.OK("invoice %s — taxSource=%s", invoice.Number, invoice.TaxSource)
+	r.log.OK("invoice %s — taxSource=%s", deref(invoice.Number), invoice.TaxSource)
 
 	// A contradiction is refused, never corrected: a positive rate cannot
 	// carry an exemption code.

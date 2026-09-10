@@ -1,5 +1,8 @@
 # Facturino demo — Go SDK
 
+SDK contract target: **2.7.0**, published and consumed here. Dependency manifests and lockfiles track the release train updates them.
+
+
 A small, runnable backend that bills the fictional **Atelier Dupont SAS** end
 to end through the Facturino API, using the official Go SDK
 (`github.com/facturino/facturino-go`). It walks the shared scenario described
@@ -21,7 +24,7 @@ The SDK is published as a Go module. This demo's `go.mod` pins the first
 release carrying fiscal decisions:
 
 ```bash
-go get github.com/facturino/facturino-go/v2@v2.5.0
+go get github.com/facturino/facturino-go/v2@v2.7.0
 ```
 
 For local development against the sibling SDK checkout, copy

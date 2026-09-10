@@ -71,7 +71,7 @@ function handleEvent(event: WebhookEvent): void {
     case 'invoice.paid':
     case 'quote.accepted':
     case 'credit_note.finalized':
-      // The resource that changed is at event.data.object.
+      // The resource that changed is `event.data.id`; `event.data.object` names its type.
       console.log(`     handled ${event.type}`);
       break;
     default:

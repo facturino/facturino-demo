@@ -283,8 +283,8 @@ func (r *Runner) StepInvoiceLifecycle(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	r.state.InvoiceNumber = finalized.Number
-	r.log.OK("finalized as %s (status %s)", finalized.Number, finalized.Status)
+	r.state.InvoiceNumber = deref(finalized.Number)
+	r.log.OK("finalized as %s (status %s)", deref(finalized.Number), finalized.Status)
 
 	r.runStep("invoices.Get", func() error {
 		_, err := r.client.Invoices.Get(invID)

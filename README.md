@@ -1,5 +1,8 @@
 # Facturino — Demos
 
+SDK contract target: **2.7.0**, published and consumed here. Dependency manifests and lockfiles track the release train updates them.
+
+
 Five small backend apps that run the **same B2B SaaS scenario** against the
 Facturino API, each in a different stack. They show how a French SaaS bills its
 customers end to end — quotes, invoices, e-invoicing deposit to the PA,
@@ -55,9 +58,9 @@ Facturino events.
 > @facturino/node`, `pip install facturino`, `composer require
 > facturino/facturino-php`, `go get …`) work directly; each stack README
 > documents its pinned range. The scenario needs the SDK major that carries
-> the stable tax determination contract: `@facturino/node` 2.5.0, `facturino`
-> (Python) 2.4.0, `facturino/facturino-php` 2.4.0 and
-> `github.com/facturino/facturino-go/v2` v2.5.0. That major is what carries
+> the stable tax determination contract: `@facturino/node` 2.7.0, `facturino`
+> (Python) 2.7.0, `facturino/facturino-php` 2.7.0 and
+> `github.com/facturino/facturino-go/v2` v2.7.0. That major is what carries
 > `finalize` with a collection, so an invoice paid before it is issued comes out
 > already acquitted.
 >

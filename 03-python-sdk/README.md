@@ -1,5 +1,8 @@
 # Atelier Dupont — Facturino demo (Python SDK)
 
+SDK contract target: **2.7.0**, published and consumed here. Dependency manifests and lockfiles track the release train updates them.
+
+
 A minimal SaaS backend whose billing runs **entirely on Facturino**, built
 with the official [`facturino`](https://github.com/facturino/facturino-python)
 Python SDK and a small Flask server.
@@ -33,7 +36,7 @@ pip install -r requirements.txt
 `requirements.txt` installs the SDK from PyPI:
 
 ```text
-facturino==2.4.0
+facturino==2.7.0
 flask>=3.0
 ```
 

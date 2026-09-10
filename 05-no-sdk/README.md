@@ -1,5 +1,8 @@
 # 05 — No SDK (raw HTTP, TypeScript)
 
+SDK contract target: **2.7.0**, published and consumed here. Dependency manifests and lockfiles track the release train updates them.
+
+
 The reference demo. It runs the shared **Atelier Dupont** scenario
 ([`../docs/SCENARIO.md`](../docs/SCENARIO.md)) against the Facturino API using
 nothing but the platform: `fetch`, `node:http`, and `node:crypto`. **Zero
