@@ -31,7 +31,7 @@ def verify_and_parse(raw_body: bytes, signature_header: str, secret: str) -> dic
         secret: The endpoint signing secret (``whsec_...``).
 
     Returns:
-        The event dict: ``{ id, type, created, livemode, data: { object } }``.
+        The event dict: ``{ id, type, created, livemode, data: { id, object, ... } }``.
 
     Raises:
         SignatureVerificationError: on a bad / missing signature or an event
@@ -48,8 +48,14 @@ def handle_event(event: dict[str, Any]) -> dict[str, Any]:
     the meaningful business transitions the SaaS cares about.
     """
     event_type = event.get("type", "")
-    obj = event.get("data", {}).get("object", {})
+    obj = event.get("data", {})
 
+    if event_type.endswith(".obligation_updated"):
+        follow = obj.get("obligation") or {}
+        # Technical recovery belongs to Facturino, without an integrator cron.
+        return {"received": True, "type": event_type, "summary":
+                f"{obj.get('id')}: {follow.get('state')}, owner={follow.get('owner')}, "
+                f"action={follow.get('action')}, next={follow.get('nextAttemptAt')}"}
     handler = _HANDLERS.get(event_type, _on_unhandled)
     summary = handler(obj, event)
     return {"received": True, "type": event_type, "summary": summary}
@@ -86,6 +92,8 @@ def _on_unhandled(_obj: dict[str, Any], event: dict[str, Any]) -> str:
 
 
 _HANDLERS: dict[str, Callable[[dict[str, Any], dict[str, Any]], str]] = {
+    "ereporting.accepted": lambda obj, _: f"Declaration {obj.get('id')} accepted.",
+    "ereporting.rejected": lambda obj, _: f"Declaration {obj.get('id')} rejected: {obj.get('paRejectionReason')}",
     "invoice.finalized": _on_invoice_finalized,
     "invoice.transmitted": _on_invoice_transmitted,
     "invoice.paid": _on_invoice_paid,

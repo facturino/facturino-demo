@@ -214,6 +214,31 @@ func (s *Server) dispatch(event *facturino.WebhookEvent) {
 	s.log.Infof("webhook %s type=%s livemode=%t object=%s", event.ID, event.Type, event.Livemode, object)
 
 	switch {
+	case strings.HasSuffix(event.Type, ".obligation_updated"):
+		var data struct {
+			Obligation *struct {
+				State         string  `json:"state"`
+				Owner         *string `json:"owner"`
+				Action        *string `json:"action"`
+				NextAttemptAt *string `json:"nextAttemptAt"`
+			} `json:"obligation"`
+		}
+		payload, marshalErr := json.Marshal(event.Data)
+		if marshalErr != nil {
+			s.log.Warnf("invalid obligation event")
+			return
+		}
+		if err := json.Unmarshal(payload, &data); err != nil {
+			s.log.Warnf("invalid obligation event")
+			return
+		}
+		// Facturino owns technical recovery; this receiver never schedules retries.
+		if data.Obligation != nil {
+			follow := data.Obligation
+			s.log.Infof("  -> follow-up %s owner=%v action=%v next=%v", follow.State, nullableText(follow.Owner), nullableText(follow.Action), nullableText(follow.NextAttemptAt))
+		}
+	case event.Type == "ereporting.accepted" || event.Type == "ereporting.rejected":
+		s.log.Infof("  -> declaration outcome %s", event.Type)
 	case event.Type == "invoice.finalized":
 		s.log.Infof("  -> invoice %s finalized: persist the legal number", object)
 	case event.Type == "invoice.transmitted":
@@ -255,4 +280,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 		// surface it in the server log.
 		fmt.Printf("writeJSON: %v\n", err)
 	}
+}
+
+func nullableText(value *string) string {
+	if value == nil {
+		return "none"
+	}
+	return *value
 }

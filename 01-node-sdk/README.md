@@ -146,3 +146,19 @@ rebuild their (idempotent) prerequisites first, so any phase runs standalone.
 
 > API keys, team members and subscription changes are managed in the Facturino
 > web app, not over the developer API, so they are not part of the SDK.
+
+
+After a durable business acceptance, Facturino owns platform submission, tracking
+and safe technical recovery. Do not install an integrator retry cron. Automatic
+e-reporting uses the frozen fiscal decision and calendar; the manual reporting
+steps in this demo are optional API examples, not an operating requirement.
+Use `invoice.obligation_updated`, `credit_note.obligation_updated`,
+`payment.obligation_updated`, `ereporting.obligation_updated` and the final
+`ereporting.accepted` / `ereporting.rejected` events for progress. Event `data` is
+flat (`id`, `object`, `obligation`), not a resource nested under `data.object`.
+`obligation` can be absent on old records or null. A customer action is only due
+when `owner` is `customer`; preserve raw platform reasons separately. Accounting
+payment is not evidence of platform receipt. Delivery can be duplicated or arrive
+out of order: persist the event before acknowledging and deduplicate on event id.
+These additions require the matching locally updated SDK, pending publication;
+they do not change the API date (2026-09-01).

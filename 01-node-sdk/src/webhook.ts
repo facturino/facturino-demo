@@ -17,10 +17,20 @@ function readRawBody(req: IncomingMessage): Promise<Buffer> {
 }
 
 /** Dispatch a verified event to the matching handler. */
-function handleEvent(event: WebhookEvent): void {
+export function handleEvent(event: WebhookEvent): void {
   // `data` is the flat payload: `id` is the resource, `object` names its type.
   const object = event.data.id
+  if (event.type.endsWith('.obligation_updated')) {
+    const follow = event.data.obligation as { state?: string; owner?: string | null; action?: string | null; nextAttemptAt?: string | null } | null | undefined
+    // Facturino owns technical recovery. No integrator polling/retry cron.
+    log.info(`[webhook] ${object}: ${follow?.state ?? 'unknown'}, owner=${follow?.owner ?? 'none'}, action=${follow?.action ?? 'none'}, next=${follow?.nextAttemptAt ?? 'none'}`)
+    return
+  }
   switch (event.type) {
+    case 'ereporting.accepted':
+    case 'ereporting.rejected':
+      log.info(`[webhook] declaration ${object}: ${event.type}; original reason=${(event.data as { paRejectionReason?: string | null }).paRejectionReason ?? 'none'}`)
+      break
     case 'invoice.finalized':
       log.ok(`[webhook] invoice ${object} finalized → number assigned, archive sealed`)
       break

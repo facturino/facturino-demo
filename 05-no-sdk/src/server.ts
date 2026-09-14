@@ -65,7 +65,16 @@ function handleEvent(event: WebhookEvent): void {
 
   console.log(`  ✓ webhook ${event.type} ${event.id} (livemode=${event.livemode})`);
 
+  if (event.type.endsWith('.obligation_updated')) {
+    const follow = event.data.obligation;
+    console.log(`     follow-up=${follow?.state ?? 'unknown'} owner=${follow?.owner ?? 'none'} action=${follow?.action ?? 'none'} next=${follow?.nextAttemptAt ?? 'none'}`);
+    // No technical retry here: the accepted obligation belongs to Facturino.
+  }
   switch (event.type) {
+    case 'ereporting.accepted':
+    case 'ereporting.rejected':
+      console.log(`     declaration outcome ${event.type}`);
+      break;
     case 'invoice.finalized':
     case 'invoice.transmitted':
     case 'invoice.paid':

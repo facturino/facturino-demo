@@ -18,7 +18,7 @@ use Facturino\Webhook;
  *  - recalcule HMAC-SHA256(secret, "<timestamp>.<rawBody>") ;
  *  - compare en temps constant (hash_equals) ;
  *  - rejette hors fenetre de tolerance (anti-rejeu, ~5 min) ;
- *  - renvoie l'enveloppe decodee { id, type, created, livemode, data:{object} }.
+ *  - renvoie l'enveloppe decodee { id, type, created, livemode, data:{id,object,...} }.
  *
  * Point critique : on lit le corps BRUT (php://input) AVANT tout parsing JSON,
  * car la signature porte sur les octets exacts du corps.
@@ -74,7 +74,7 @@ final class WebhookController
     private function dispatch(array $event): void
     {
         $type = $event['type'] ?? '';
-        $object = $event['data']['object'] ?? ($event['data'] ?? []);
+        $object = $event['data'] ?? [];
 
         // Dans une vraie app : persister (id, type) pour la deduplication, puis
         // mettre a jour l'etat metier. Ici on journalise simplement.
@@ -87,7 +87,16 @@ final class WebhookController
         );
         error_log($line);
 
+        if (str_ends_with($type, '.obligation_updated')) {
+            $follow = $object['obligation'] ?? [];
+            // Facturino reprend les traitements techniques ; aucun cron intégrateur.
+            error_log(sprintf('  -> suivi=%s responsable=%s action=%s prochaine=%s',
+                $follow['state'] ?? 'unknown', $follow['owner'] ?? 'none',
+                $follow['action'] ?? 'none', $follow['nextAttemptAt'] ?? 'none'));
+            return;
+        }
         match ($type) {
+            'ereporting.accepted', 'ereporting.rejected' => error_log('  -> déclaration ' . $type),
             'invoice.finalized' => $this->onInvoiceFinalized($object),
             'invoice.transmitted' => $this->onInvoiceTransmitted($object),
             'invoice.paid' => $this->onInvoicePaid($object),

@@ -31,7 +31,7 @@ export interface WebhookEvent<T = unknown> {
   created: string;
   livemode: boolean;
   /** Flat payload: `id` is the resource, `object` names its type, then its fields. */
-  data: { id: string; object: string } & T;
+  data: { id: string; object: string; obligation?: { state: string; owner: string | null; action: string | null; nextAttemptAt: string | null } | null } & T;
   request?: { id?: string; idempotencyKey?: string } | null;
 }
 
