@@ -26,8 +26,8 @@ func (r *Runner) StepQuoteToInvoice(ctx context.Context) error {
 		ValidityDays: 30,
 		Notes:        "Devis de mise en place + premier mois d'abonnement.",
 		Items: []*facturino.ItemParams{
-			{Description: "Prestation de mise en place", Quantity: "1", Unit: "flat_rate", UnitPrice: 75000, VATRate: 2000, VATCode: "S", Product: r.state.OneOffProductID},
-			{Description: "Abonnement Atelier Pro (mois 1)", Quantity: "1", Unit: "month", UnitPrice: 4900, VATRate: 2000, VATCode: "S", Product: r.state.SubscriptionProductID},
+			{Description: "Prestation de mise en place", Quantity: "1", Unit: "flat_rate", UnitPrice: 75000, VATRate: 2000, VATCode: "S", SupplyCategory: "services", Product: r.state.OneOffProductID},
+			{Description: "Abonnement Atelier Pro (mois 1)", Quantity: "1", Unit: "month", UnitPrice: 4900, VATRate: 2000, VATCode: "S", SupplyCategory: "electronically_supplied_services", Product: r.state.SubscriptionProductID},
 		},
 		IdempotencyKey: r.idemKey("quote"),
 	})

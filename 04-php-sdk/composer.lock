@@ -4,20 +4,20 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "3f87953bac91720464d2eb69775dc055",
+    "content-hash": "40fdaf67609081c468761b00b81370f3",
     "packages": [
         {
             "name": "facturino/facturino-php",
-            "version": "v2.10.0",
+            "version": "v2.11.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/facturino/facturino-php.git",
-                "reference": "dc8333e756fa75bf6ca14e5aecf22cbf0b26cecc"
+                "reference": "31eccb5f1008fcef619e5a4683652c8a9e2f0ca5"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/facturino/facturino-php/zipball/dc8333e756fa75bf6ca14e5aecf22cbf0b26cecc",
-                "reference": "dc8333e756fa75bf6ca14e5aecf22cbf0b26cecc",
+                "url": "https://api.github.com/repos/facturino/facturino-php/zipball/31eccb5f1008fcef619e5a4683652c8a9e2f0ca5",
+                "reference": "31eccb5f1008fcef619e5a4683652c8a9e2f0ca5",
                 "shasum": ""
             },
             "require": {
@@ -57,9 +57,9 @@
             ],
             "support": {
                 "issues": "https://github.com/facturino/facturino-php/issues",
-                "source": "https://github.com/facturino/facturino-php/tree/v2.10.0"
+                "source": "https://github.com/facturino/facturino-php/tree/v2.11.0"
             },
-            "time": "2026-09-14T12:20:42+00:00"
+            "time": "2026-10-24T20:35:22+00:00"
         }
     ],
     "packages-dev": [],

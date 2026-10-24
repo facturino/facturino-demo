@@ -309,17 +309,26 @@ export class Scenario {
         `converted draft ${draftFromQuote.id} carries no commercial operation — the quote cycle cannot continue`,
       )
     }
+    // The fiscal nature is a fact the seller declares on the quote line; a
+    // draft line without it is never decided under a guessed nature.
     const decision = await this.decide(
       customer,
-      commercial.lines.map((line) => ({
-        reference: line.reference,
-        description: line.description,
-        category: line.supplyCategory,
-        rateCategory: line.rateCategory,
-        unitAmount: line.unitPrice,
-        quantity: line.quantity,
-        ...(line.discount ? { discount: line.discount } : {}),
-      })),
+      commercial.lines.map((line) => {
+        if (line.supplyCategory === undefined) {
+          throw new Error(
+            `line ${line.reference} of draft ${draftFromQuote.id} declares no supplyCategory — declare it on the quote line`,
+          )
+        }
+        return {
+          reference: line.reference,
+          description: line.description,
+          category: line.supplyCategory,
+          rateCategory: line.rateCategory,
+          unitAmount: line.unitPrice,
+          quantity: line.quantity,
+          ...(line.discount ? { discount: line.discount } : {}),
+        }
+      }),
       'quote-invoice', draftFromQuote.id,
     )
     if (!decision) {
@@ -1549,6 +1558,7 @@ export class Scenario {
       vatRate: 2000, // indicative on a quote; the decision concludes
       vatCode: 'S',
       product: product.id,
+      supplyCategory: 'services', // the fiscal nature is declared, never inferred
     }
   }
 

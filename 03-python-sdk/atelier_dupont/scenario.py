@@ -296,7 +296,7 @@ def phase_c_quote(client: facturino.Client, log: list[dict[str, Any]], state: di
                 "customerId": customer_id,
                 "validityDays": 30,
                 "lines": [
-                    {"description": "Prestation atelier (3 jours)", "quantity": "3", "unitPrice": 60000, "vatRate": 2000, "vatCode": "S", "unit": "unit"},
+                    {"description": "Prestation atelier (3 jours)", "quantity": "3", "unitPrice": 60000, "vatRate": 2000, "vatCode": "S", "unit": "unit", "supplyCategory": "services"},
                 ],
                 "notes": "Devis valable 30 jours.",
             },

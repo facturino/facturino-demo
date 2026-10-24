@@ -329,6 +329,7 @@ final class Scenario
                         'unitPrice' => 30000, // 300,00 EUR HT
                         'vatRate' => 2000,
                         'vatCode' => 'S',
+                        'supplyCategory' => 'services',
                     ],
                 ],
                 'dates' => [

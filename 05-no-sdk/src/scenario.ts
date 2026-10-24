@@ -570,6 +570,7 @@ export class Scenario {
             vatRate: 2000,
             vatCode: 'S',
             unit: 'flat_rate',
+            supplyCategory: 'services',
           },
           {
             description: 'Conseil sur mesure',
@@ -578,6 +579,7 @@ export class Scenario {
             vatRate: 2000,
             vatCode: 'S',
             unit: 'hour',
+            supplyCategory: 'services',
           },
         ],
         dates: {
