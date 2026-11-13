@@ -1,2 +1,4 @@
 github.com/facturino/facturino-go/v2 v2.12.0 h1:P6fFnEpLdpjXXHsIgcml1atmCnHSbq584xJymhcfLYU=
 github.com/facturino/facturino-go/v2 v2.12.0/go.mod h1:/qgLE79OASu4kFkVVzzLV9g2PUUbYDbhkT6Bx1ie1AM=
+github.com/facturino/facturino-go/v2 v2.13.0 h1:FLybpuPPwxgzO9ITzP9d6Jkp8V8sAQjzPgOJyZ3kIsc=
+github.com/facturino/facturino-go/v2 v2.13.0/go.mod h1:/qgLE79OASu4kFkVVzzLV9g2PUUbYDbhkT6Bx1ie1AM=

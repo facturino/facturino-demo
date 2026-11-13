@@ -445,7 +445,7 @@ export class Scenario {
       })
       log.info(`Audit-trail PDF job ${pdfJob.id} (${pdfJob.status})`)
     } catch (err) {
-      log.warn(`audit trail (Pro plan): ${describeError(err)}`)
+      log.warn(`audit trail: ${describeError(err)}`)
     }
 
     // D.15 — Clone as a new draft (manual one-off recurrence).
